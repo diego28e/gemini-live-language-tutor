@@ -22,11 +22,11 @@ graph TD
     end
 
     UI <-->|HTTPS/JWT| API
-    UI <-->|WebRTC (Audio/Video)| SFU
+    UI <-->|WebRTC Audio/Video| SFU
     API -->|Read/Write| DB
     API -->|Generate Tokens| SFU
     API -.->|Reads| SM
     Agent -.->|Reads| SM
-    Agent <-->|WebRTC (Audio/Video)| SFU
+    Agent <-->|WebRTC Audio/Video| SFU
     Agent <-->|WebSocket| AI
 ```
