@@ -45,8 +45,8 @@ app.post('/api/token', async (req: express.Request, res: express.Response): Prom
             return res.status(400).json({ error: 'lessonId is required' });
         }
 
-        // Generate room name
-        const roomName = `lesson-${lessonId.substring(0, 8)}-${uuidv4().substring(0, 8)}`;
+        // Generate room name using the full UUID to allow the agent to fetch it
+        const roomName = `l-${lessonId}-${uuidv4().substring(0, 8)}`;
 
         // Generate LiveKit token
         const apiKey = process.env.LIVEKIT_API_KEY;
