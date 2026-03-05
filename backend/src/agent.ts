@@ -50,7 +50,7 @@ export default defineAgent({
 
             const session = new voice.AgentSession({ llm: realtimeModel });
             await session.start({ agent, room: ctx.room! });
-            session.say("Let's begin! " + systemPrompt.split('.')[0] + '.');
+            session.generateReply();
 
             console.log("[agent] Gemini 2.0 Multimodal Agent started successfully.");
         } catch (e) {
