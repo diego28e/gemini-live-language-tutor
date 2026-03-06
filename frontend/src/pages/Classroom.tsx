@@ -9,6 +9,7 @@ import {
     useVoiceAssistant,
     useTracks,
     VideoTrack,
+    useTranscriptions,
 } from '@livekit/components-react';
 import { Track } from 'livekit-client';
 import { auth } from '../firebase';
@@ -107,9 +108,15 @@ const SESSION_SECONDS = 15 * 60;
 
 function ActiveClassroom() {
     const { state: agentState, audioTrack: agentAudio } = useVoiceAssistant();
+    const transcriptions = useTranscriptions();
     const [secondsLeft, setSecondsLeft] = useState(SESSION_SECONDS);
     const cameraTracks = useTracks([Track.Source.Camera], { onlySubscribed: false });
     const localCameraTrack = cameraTracks.find(t => t.participant.isLocal && !t.publication.isMuted);
+
+    // Keep only the last 3 non-empty transcription entries for display
+    const captionLines = transcriptions
+        .filter(t => (t.text ?? '').trim())
+        .slice(-3);
 
     useEffect(() => {
         const interval = setInterval(() => setSecondsLeft(s => Math.max(0, s - 1)), 1000);
@@ -127,21 +134,19 @@ function ActiveClassroom() {
         <div className="flex-1 flex flex-col items-center justify-center px-4 relative z-0">
 
             {/* Countdown Timer */}
-            <div className={`absolute top-16 right-6 px-4 py-2 rounded-full text-sm font-mono font-bold border backdrop-blur-md ${
-                timerUrgent
-                    ? 'bg-red-500/20 border-red-500/40 text-red-400'
-                    : 'bg-white/5 border-white/10 text-slate-300'
-            }`}>
+            <div className={`absolute top-16 right-6 px-4 py-2 rounded-full text-sm font-mono font-bold border backdrop-blur-md ${timerUrgent
+                ? 'bg-red-500/20 border-red-500/40 text-red-400'
+                : 'bg-white/5 border-white/10 text-slate-300'
+                }`}>
                 {minutes}:{seconds}
             </div>
 
             {/* Main Agent Visualization */}
             <div className="relative mb-8 flex flex-col items-center">
-                <div className={`w-48 h-48 rounded-full border border-white/10 bg-gradient-to-br transition-colors duration-1000 flex items-center justify-center relative shadow-2xl ${
-                    isAgentSpeaking ? 'from-indigo-500/40 to-purple-500/10 shadow-indigo-500/20' :
+                <div className={`w-48 h-48 rounded-full border border-white/10 bg-gradient-to-br transition-colors duration-1000 flex items-center justify-center relative shadow-2xl ${isAgentSpeaking ? 'from-indigo-500/40 to-purple-500/10 shadow-indigo-500/20' :
                     isAgentListening ? 'from-emerald-500/40 to-teal-500/10 shadow-emerald-500/20' :
-                    'from-slate-800 to-slate-900 shadow-none'
-                }`}>
+                        'from-slate-800 to-slate-900 shadow-none'
+                    }`}>
                     {agentAudio && (
                         <BarVisualizer
                             trackRef={agentAudio}
@@ -159,6 +164,17 @@ function ActiveClassroom() {
                     <p className="text-slate-400 text-sm">Speak naturally. Interrupt whenever you want.</p>
                 </div>
             </div>
+
+            {/* Real-time Closed Captions */}
+            {captionLines.length > 0 && (
+                <div className="w-full max-w-2xl mx-auto px-4 mb-4 flex flex-col items-center gap-1">
+                    {captionLines.map((t, i) => (
+                        <p key={i} className="text-sm text-center text-white bg-black/60 backdrop-blur-sm rounded px-3 py-1 leading-relaxed">
+                            {t.text}
+                        </p>
+                    ))}
+                </div>
+            )}
 
             {/* Camera preview — shown when camera is on */}
             {localCameraTrack && (

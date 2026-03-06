@@ -1,4 +1,4 @@
-import { WorkerOptions, cli, JobContext, voice, defineAgent } from '@livekit/agents';
+import { WorkerOptions, cli, JobContext, voice, defineAgent, llm } from '@livekit/agents';
 import * as dotenv from 'dotenv';
 import { pool } from './db.js';
 import * as google from '@livekit/agents-plugin-google';
@@ -67,7 +67,9 @@ IMPORTANT RULES:
             const realtimeModel = new google.beta.realtime.RealtimeModel({
                 model: 'gemini-2.5-flash-native-audio-preview-09-2025',
                 instructions: systemPrompt,
-                voice: agentVoice
+                voice: agentVoice,
+                // Enable Gemini's own output transcription so we can forward it word-by-word
+                outputAudioTranscription: {}
             });
 
             const agent = new voice.Agent({
@@ -80,6 +82,76 @@ IMPORTANT RULES:
             session.generateReply();
 
             console.log("[agent] Agent started successfully.");
+
+            // ── Real-time Closed Captions ──────────────────────────────────────────
+            // The underlying RealtimeSession emits 'generation_created' for every response turn.
+            // Each generation exposes a textStream where outputTranscription chunks land word-by-word.
+            // We read that stream and publish each chunk via LiveKit's built-in transcription data channel
+            // so the frontend can pick them up with useTranscriptions().
+            const realtimeSession = (realtimeModel as any)._session as (llm.RealtimeSession | undefined);
+            const room = ctx.room!;
+            const localParticipant = room.localParticipant!;
+            if (realtimeSession) {
+                realtimeSession.on('generation_created', (event: llm.GenerationCreatedEvent) => {
+                    if (!localParticipant) return;
+                    (async () => {
+                        try {
+                            const reader = event.messageStream.getReader();
+                            while (true) {
+                                const { done: msgDone, value: msg } = await reader.read();
+                                if (msgDone || !msg) break;
+                                // Each msg is a MessageGeneration with its own textStream
+                                const { messageId, textStream } = msg;
+                                const textReader = textStream.getReader();
+                                let segmentId = messageId;
+                                let accumulator = '';
+                                while (true) {
+                                    const { done: textDone, value: chunk } = await textReader.read();
+                                    if (textDone) break;
+                                    if (!chunk) continue;
+                                    const text = typeof chunk === 'string' ? chunk : (chunk as any).text ?? '';
+                                    if (!text) continue;
+                                    accumulator += text;
+                                    // Publish each word chunk as a non-final segment so the frontend
+                                    // shows it immediately while the agent is speaking
+                                    localParticipant.publishTranscription({
+                                        participantIdentity: localParticipant.identity,
+                                        trackSid: '',
+                                        segments: [{
+                                            id: segmentId,
+                                            text: accumulator,
+                                            final: false,
+                                            language: '',
+                                            startTime: BigInt(0),
+                                            endTime: BigInt(0)
+                                        }]
+                                    });
+                                }
+                                // Mark the last segment as final when the turn ends
+                                if (accumulator) {
+                                    localParticipant.publishTranscription({
+                                        participantIdentity: localParticipant.identity,
+                                        trackSid: '',
+                                        segments: [{
+                                            id: segmentId,
+                                            text: accumulator,
+                                            final: true,
+                                            language: '',
+                                            startTime: BigInt(0),
+                                            endTime: BigInt(0)
+                                        }]
+                                    });
+                                }
+                            }
+                        } catch (e) {
+                            // Silently ignore — stream may close on barge-in
+                        }
+                    })();
+                });
+            } else {
+                console.warn('[agent] Could not access RealtimeSession for captions. The agent session may be structured differently.');
+            }
+            // ──────────────────────────────────────────────────────────────────────
 
             // Vision: stream user camera at 1fps to Gemini via realtimeInput
             const startVideoStream = (track: Track) => {
@@ -103,7 +175,7 @@ IMPORTANT RULES:
                                 });
                             }
                         }
-                    } catch (_) {}
+                    } catch (_) { }
                 })();
             };
 
@@ -124,7 +196,7 @@ IMPORTANT RULES:
                 console.log(`[agent] 15-minute session limit reached for room: ${roomName}`);
                 try {
                     session.say("We've reached the end of our 15-minute session! Great work today. Keep practicing and see you next time!");
-                } catch (_) {}
+                } catch (_) { }
                 setTimeout(() => session.close(), 5000);
             }, SESSION_LIMIT_MS);
 
