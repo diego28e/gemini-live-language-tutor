@@ -101,8 +101,20 @@ export default function Classroom() {
 }
 
 // Custom classroom container using LiveKit hooks
+const SESSION_SECONDS = 15 * 60;
+
 function ActiveClassroom() {
     const { state: agentState, audioTrack: agentAudio } = useVoiceAssistant();
+    const [secondsLeft, setSecondsLeft] = useState(SESSION_SECONDS);
+
+    useEffect(() => {
+        const interval = setInterval(() => setSecondsLeft(s => Math.max(0, s - 1)), 1000);
+        return () => clearInterval(interval);
+    }, []);
+
+    const minutes = String(Math.floor(secondsLeft / 60)).padStart(2, '0');
+    const seconds = String(secondsLeft % 60).padStart(2, '0');
+    const timerUrgent = secondsLeft <= 120;
 
     const isAgentSpeaking = agentState === 'speaking';
     const isAgentListening = agentState === 'listening';
@@ -110,13 +122,22 @@ function ActiveClassroom() {
     return (
         <div className="flex-1 flex flex-col items-center justify-center px-4 relative z-0">
 
+            {/* Countdown Timer */}
+            <div className={`absolute top-16 right-6 px-4 py-2 rounded-full text-sm font-mono font-bold border backdrop-blur-md ${
+                timerUrgent
+                    ? 'bg-red-500/20 border-red-500/40 text-red-400'
+                    : 'bg-white/5 border-white/10 text-slate-300'
+            }`}>
+                {minutes}:{seconds}
+            </div>
+
             {/* Main Agent Visualization */}
-            <div className="relative mb-20 flex flex-col items-center">
-                <div className={`w-48 h-48 rounded-full border border-white/10 bg-gradient-to-br transition-colors duration-1000 flex items-center justify-center relative shadow-2xl ${isAgentSpeaking ? 'from-indigo-500/40 to-purple-500/10 shadow-indigo-500/20' :
+            <div className="relative mb-8 flex flex-col items-center">
+                <div className={`w-48 h-48 rounded-full border border-white/10 bg-gradient-to-br transition-colors duration-1000 flex items-center justify-center relative shadow-2xl ${
+                    isAgentSpeaking ? 'from-indigo-500/40 to-purple-500/10 shadow-indigo-500/20' :
                     isAgentListening ? 'from-emerald-500/40 to-teal-500/10 shadow-emerald-500/20' :
-                        'from-slate-800 to-slate-900 shadow-none'
-                    }`}>
-                    {/* Agent Visualizer */}
+                    'from-slate-800 to-slate-900 shadow-none'
+                }`}>
                     {agentAudio && (
                         <BarVisualizer
                             trackRef={agentAudio}
@@ -125,16 +146,13 @@ function ActiveClassroom() {
                             className="w-24 h-24 text-white opacity-80"
                         />
                     )}
-
-                    {/* Pulse ring when speaking */}
                     {isAgentSpeaking && (
                         <div className="absolute inset-0 rounded-full border-2 border-indigo-400 opacity-50 animate-ping" />
                     )}
                 </div>
-
-                <div className="mt-8 text-center">
-                    <h2 className="text-2xl font-semibold mb-2">Tutor ({agentState})</h2>
-                    <p className="text-slate-400">Speak naturally. Interrupt whenever you want.</p>
+                <div className="mt-6 text-center">
+                    <h2 className="text-2xl font-semibold mb-1">Tutor ({agentState})</h2>
+                    <p className="text-slate-400 text-sm">Speak naturally. Interrupt whenever you want.</p>
                 </div>
             </div>
 
@@ -143,7 +161,6 @@ function ActiveClassroom() {
                 <TrackToggle source={Track.Source.Microphone} className="p-4 rounded-full bg-slate-800 hover:bg-slate-700 transition data-[state=off]:bg-red-500/80" />
                 <TrackToggle source={Track.Source.Camera} className="p-4 rounded-full bg-slate-800 hover:bg-slate-700 transition data-[state=on]:bg-indigo-500" />
             </div>
-
         </div>
     );
 }
