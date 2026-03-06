@@ -7,6 +7,8 @@ import {
     TrackToggle,
     BarVisualizer,
     useVoiceAssistant,
+    useTracks,
+    VideoTrack,
 } from '@livekit/components-react';
 import { Track } from 'livekit-client';
 import { auth } from '../firebase';
@@ -106,6 +108,8 @@ const SESSION_SECONDS = 15 * 60;
 function ActiveClassroom() {
     const { state: agentState, audioTrack: agentAudio } = useVoiceAssistant();
     const [secondsLeft, setSecondsLeft] = useState(SESSION_SECONDS);
+    const cameraTracks = useTracks([Track.Source.Camera], { onlySubscribed: false });
+    const localCameraTrack = cameraTracks.find(t => t.participant.isLocal && !t.publication.isMuted);
 
     useEffect(() => {
         const interval = setInterval(() => setSecondsLeft(s => Math.max(0, s - 1)), 1000);
@@ -155,6 +159,13 @@ function ActiveClassroom() {
                     <p className="text-slate-400 text-sm">Speak naturally. Interrupt whenever you want.</p>
                 </div>
             </div>
+
+            {/* Camera preview — shown when camera is on */}
+            {localCameraTrack && (
+                <div className="absolute bottom-24 right-6 w-36 h-24 rounded-xl overflow-hidden border border-white/20 shadow-xl">
+                    <VideoTrack trackRef={localCameraTrack} className="w-full h-full object-cover scale-x-[-1]" />
+                </div>
+            )}
 
             {/* Control Bar */}
             <div className="absolute bottom-8 left-1/2 -translate-x-1/2 flex items-center gap-4 bg-slate-900/80 backdrop-blur-xl border border-white/10 p-3 rounded-full shadow-2xl">

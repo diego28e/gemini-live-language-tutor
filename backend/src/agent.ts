@@ -3,6 +3,9 @@ import * as dotenv from 'dotenv';
 import { pool } from './db.js';
 import * as google from '@livekit/agents-plugin-google';
 import { fileURLToPath } from 'node:url';
+import { VideoStream, VideoBufferType, TrackKind } from '@livekit/rtc-node';
+import type { Track } from '@livekit/rtc-node';
+import sharp from 'sharp';
 
 dotenv.config();
 
@@ -77,6 +80,44 @@ IMPORTANT RULES:
             session.generateReply();
 
             console.log("[agent] Agent started successfully.");
+
+            // Vision: stream user camera at 1fps to Gemini via realtimeInput
+            const startVideoStream = (track: Track) => {
+                const videoStream = new VideoStream(track);
+                let lastFrameTime = 0;
+                (async () => {
+                    try {
+                        for await (const { frame } of videoStream) {
+                            const now = Date.now();
+                            if (now - lastFrameTime < 1000) continue; // 1fps throttle
+                            lastFrameTime = now;
+                            const rgba = frame.convert(VideoBufferType.RGBA);
+                            const jpegBuf = await sharp(Buffer.from(rgba.data), {
+                                raw: { width: rgba.width, height: rgba.height, channels: 4 }
+                            }).jpeg({ quality: 75 }).toBuffer();
+                            const realtimeSession = (session as any).activity?.realtimeLLMSession;
+                            const activeSession = realtimeSession ? (realtimeSession as any).activeSession : null;
+                            if (activeSession) {
+                                await activeSession.sendRealtimeInput({
+                                    media: { mimeType: 'image/jpeg', data: jpegBuf.toString('base64') }
+                                });
+                            }
+                        }
+                    } catch (_) {}
+                })();
+            };
+
+            ctx.room!.on('trackSubscribed', (track, _pub, _participant) => {
+                if (track.kind === TrackKind.KIND_VIDEO) startVideoStream(track);
+            });
+            // Handle camera already published before agent joined
+            for (const participant of ctx.room!.remoteParticipants.values()) {
+                for (const pub of participant.trackPublications.values()) {
+                    if (pub.track && pub.track.kind === TrackKind.KIND_VIDEO) {
+                        startVideoStream(pub.track as Track);
+                    }
+                }
+            }
 
             // 15-minute hard stop
             const hardStopTimer = setTimeout(async () => {

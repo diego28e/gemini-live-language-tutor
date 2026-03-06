@@ -18,12 +18,14 @@
   "dependencies": {
     "@livekit/agents": "^1.0.48",
     "@livekit/agents-plugin-google": "^1.0.48",
+    "@livekit/rtc-node": "^0.13.24",
     "cors": "^2.8.6",
     "dotenv": "^17.3.1",
     "express": "^5.2.1",
     "firebase-admin": "^13.7.0",
     "livekit-server-sdk": "^2.15.0",
     "pg": "^8.19.0",
+    "sharp": "^0.34.5",
     "uuid": "^13.0.0"
   },
   "devDependencies": {
@@ -31,6 +33,7 @@
     "@types/express": "^5.0.6",
     "@types/node": "^25.3.3",
     "@types/pg": "^8.18.0",
+    "@types/sharp": "^0.32.0",
     "@types/uuid": "^11.0.0",
     "tsx": "^4.21.0",
     "typescript": "^5.9.3"
