@@ -14,10 +14,42 @@ import {
 import { Track } from 'livekit-client';
 import { auth } from '../firebase';
 import { ArrowLeft, Loader2, Languages, X } from 'lucide-react';
+import Lottie from 'lottie-react';
 
 // ---------------------------------------------------------------------------
-// Language code mapping — display name (stored in DB) → BCP-47 code for Azure
+// No-credits screen
 // ---------------------------------------------------------------------------
+function NoCreditsScreen() {
+    const navigate = useNavigate();
+    const [animData, setAnimData] = useState<object | null>(null);
+
+    useEffect(() => {
+        fetch('/animations/nothing.json')
+            .then(r => r.json())
+            .then(setAnimData)
+            .catch(() => {/* animation optional */ });
+    }, []);
+
+    return (
+        <div className="flex h-screen flex-col items-center justify-center bg-slate-950 text-white px-6">
+            <div className="w-64 h-64">
+                {animData && <Lottie animationData={animData} loop />}
+            </div>
+            <h2 className="text-2xl font-bold mt-2 mb-3">You're out of sessions</h2>
+            <p className="text-slate-400 text-center max-w-sm mb-8">
+                You've used all your practice sessions for this month.
+                Your credits reset automatically on the <span className="text-white font-medium">1st of each month</span>.
+            </p>
+            <button
+                onClick={() => navigate('/')}
+                className="px-6 py-3 rounded-full bg-indigo-600 hover:bg-indigo-500 transition font-semibold text-sm"
+            >
+                ← Back to lessons
+            </button>
+        </div>
+    );
+}
+
 const LANG_CODE: Record<string, string> = {
     English: 'en',
     Spanish: 'es',
@@ -92,6 +124,7 @@ export default function Classroom() {
     const navigate = useNavigate();
     const [token, setToken] = useState('');
     const [error, setError] = useState('');
+    const [noCredits, setNoCredits] = useState(false);
     const [nativeLanguage, setNativeLanguage] = useState<string>('');
     const [lessonLanguage, setLessonLanguage] = useState<string>('');
 
@@ -115,7 +148,12 @@ export default function Classroom() {
                     body: JSON.stringify({ lessonId }),
                 });
 
-                if (!res.ok) throw new Error('Failed to get token');
+                if (res.status === 402) {
+                    setNoCredits(true);
+                    return;
+                }
+
+                if (!res.ok) throw new Error('Failed to connect to classroom. Please try again.');
 
                 const data = await res.json();
                 setToken(data.token);
@@ -135,6 +173,9 @@ export default function Classroom() {
 
         initRoom();
     }, [lessonId, navigate]);
+
+    if (noCredits) return <NoCreditsScreen />;
+
 
     if (error) {
         return (
