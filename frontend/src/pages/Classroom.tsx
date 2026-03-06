@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import {
     LiveKitRoom,
@@ -13,13 +13,87 @@ import {
 } from '@livekit/components-react';
 import { Track } from 'livekit-client';
 import { auth } from '../firebase';
-import { ArrowLeft, Loader2 } from 'lucide-react';
+import { ArrowLeft, Loader2, Languages, X } from 'lucide-react';
 
+// ---------------------------------------------------------------------------
+// Language code mapping — display name (stored in DB) → BCP-47 code for Azure
+// ---------------------------------------------------------------------------
+const LANG_CODE: Record<string, string> = {
+    English: 'en',
+    Spanish: 'es',
+    Portuguese: 'pt',
+    French: 'fr',
+    Italian: 'it',
+    German: 'de',
+    Mandarin: 'zh-Hans',
+    Arabic: 'ar',
+    Other: 'en', // fallback
+};
+
+// ---------------------------------------------------------------------------
+// Translation tooltip component
+// ---------------------------------------------------------------------------
+interface TranslationTooltipProps {
+    text: string;
+    translation: string | null;
+    loading: boolean;
+    sameLanguage: boolean;
+    position: { x: number; y: number };
+    onClose: () => void;
+}
+
+function TranslationTooltip({ text, translation, loading, sameLanguage, position, onClose }: TranslationTooltipProps) {
+    return (
+        <div
+            className="fixed z-50 max-w-xs bg-slate-900 border border-white/15 rounded-2xl shadow-2xl shadow-black/50 p-4 backdrop-blur-xl"
+            style={{ left: position.x, top: position.y, transform: 'translateX(-50%) translateY(-110%)' }}
+        >
+            {/* small caret */}
+            <div className="absolute bottom-[-6px] left-1/2 -translate-x-1/2 w-3 h-3 bg-slate-900 border-r border-b border-white/15 rotate-45" />
+
+            <div className="flex items-start justify-between gap-3 mb-2">
+                <div className="flex items-center gap-1.5 text-xs font-semibold text-indigo-400 uppercase tracking-wide">
+                    <Languages className="w-3.5 h-3.5" />
+                    Translation
+                </div>
+                <button onClick={onClose} className="text-slate-500 hover:text-white transition">
+                    <X className="w-3.5 h-3.5" />
+                </button>
+            </div>
+
+            <p className="text-xs text-slate-400 mb-2 italic leading-snug">"{text}"</p>
+
+            {loading && (
+                <div className="flex items-center gap-2 text-slate-300 text-sm">
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    <span>Translating…</span>
+                </div>
+            )}
+            {!loading && sameLanguage && (
+                <p className="text-slate-300 text-sm leading-snug">
+                    💡 The lesson is in your native language — no translation needed.
+                </p>
+            )}
+            {!loading && !sameLanguage && translation && (
+                <p className="text-white text-sm font-medium leading-snug">{translation}</p>
+            )}
+            {!loading && !sameLanguage && !translation && (
+                <p className="text-red-400 text-sm">Could not translate. Check Azure credentials.</p>
+            )}
+        </div>
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Main Classroom page
+// ---------------------------------------------------------------------------
 export default function Classroom() {
     const { lessonId } = useParams();
     const navigate = useNavigate();
     const [token, setToken] = useState('');
     const [error, setError] = useState('');
+    const [nativeLanguage, setNativeLanguage] = useState<string>('');
+    const [lessonLanguage, setLessonLanguage] = useState<string>('');
 
     useEffect(() => {
         if (!auth.currentUser) {
@@ -36,16 +110,24 @@ export default function Classroom() {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json',
-                        'Authorization': `Bearer ${idToken}`
+                        'Authorization': `Bearer ${idToken}`,
                     },
-                    body: JSON.stringify({ lessonId })
+                    body: JSON.stringify({ lessonId }),
                 });
 
                 if (!res.ok) throw new Error('Failed to get token');
 
                 const data = await res.json();
                 setToken(data.token);
-                console.log('Joined room:', data.roomName);
+                setNativeLanguage(data.nativeLanguage ?? '');
+
+                // Fetch lesson language for translation direction
+                const lessonsRes = await fetch(`${apiUrl}/api/lessons`);
+                if (lessonsRes.ok) {
+                    const lessons = await lessonsRes.json();
+                    const lesson = lessons.find((l: { id: string; language: string }) => l.id === lessonId);
+                    if (lesson) setLessonLanguage(lesson.language ?? '');
+                }
             } catch (err: any) {
                 setError(err.message);
             }
@@ -74,7 +156,6 @@ export default function Classroom() {
 
     return (
         <div className="flex flex-col h-screen bg-slate-950 text-white relative overflow-hidden">
-            {/* Background glow */}
             <div className="absolute inset-0 bg-gradient-to-b from-indigo-900/10 to-slate-950/90 pointer-events-none" />
 
             <header className="absolute top-0 w-full p-4 flex items-center justify-between z-10">
@@ -87,15 +168,14 @@ export default function Classroom() {
             </header>
 
             <LiveKitRoom
-                video={false} // Don't auto-publish video, we toggle it manually for the 1fps vision feed
-                audio={true}  // Auto-prompt for mic immediately
+                video={false}
+                audio={true}
                 token={token}
-                serverUrl={import.meta.env.VITE_LIVEKIT_URL || "wss://mock-server.livekit.cloud"}
-                // Use the explicit connect=true to start immediately
+                serverUrl={import.meta.env.VITE_LIVEKIT_URL || 'wss://mock-server.livekit.cloud'}
                 connect={true}
                 className="flex-1 flex flex-col"
             >
-                <ActiveClassroom />
+                <ActiveClassroom nativeLanguage={nativeLanguage} lessonLanguage={lessonLanguage} />
                 <RoomAudioRenderer />
                 <StartAudio label="Click to allow audio playback" />
             </LiveKitRoom>
@@ -103,20 +183,45 @@ export default function Classroom() {
     );
 }
 
+// ---------------------------------------------------------------------------
 // Custom classroom container using LiveKit hooks
+// ---------------------------------------------------------------------------
 const SESSION_SECONDS = 15 * 60;
 
-function ActiveClassroom() {
+interface ActiveClassroomProps {
+    nativeLanguage: string;
+    lessonLanguage: string;
+}
+
+interface TooltipState {
+    visible: boolean;
+    selectedText: string;
+    translation: string | null;
+    loading: boolean;
+    sameLanguage: boolean;
+    position: { x: number; y: number };
+}
+
+function ActiveClassroom({ nativeLanguage, lessonLanguage }: ActiveClassroomProps) {
     const { state: agentState, audioTrack: agentAudio } = useVoiceAssistant();
     const transcriptions = useTranscriptions();
     const [secondsLeft, setSecondsLeft] = useState(SESSION_SECONDS);
     const cameraTracks = useTracks([Track.Source.Camera], { onlySubscribed: false });
     const localCameraTrack = cameraTracks.find(t => t.participant.isLocal && !t.publication.isMuted);
+    const captionRef = useRef<HTMLDivElement>(null);
 
-    // Keep only the last 3 non-empty transcription entries for display
-    const captionLines = transcriptions
-        .filter(t => (t.text ?? '').trim())
-        .slice(-3);
+    const [tooltip, setTooltip] = useState<TooltipState>({
+        visible: false,
+        selectedText: '',
+        translation: null,
+        loading: false,
+        sameLanguage: false,
+        position: { x: 0, y: 0 },
+    });
+
+    // Keep finalised (stable) caption turns separately for selection, and live (non-final) for display
+    const allTranscriptions = transcriptions.filter(t => (t.text ?? '').trim());
+    const captionLines = allTranscriptions.slice(-3);
 
     useEffect(() => {
         const interval = setInterval(() => setSecondsLeft(s => Math.max(0, s - 1)), 1000);
@@ -126,12 +231,78 @@ function ActiveClassroom() {
     const minutes = String(Math.floor(secondsLeft / 60)).padStart(2, '0');
     const seconds = String(secondsLeft % 60).padStart(2, '0');
     const timerUrgent = secondsLeft <= 120;
-
     const isAgentSpeaking = agentState === 'speaking';
     const isAgentListening = agentState === 'listening';
 
+    // ------------------------------------------------------------------
+    // Translation: triggered when the user releases a mouse drag selection
+    // inside the caption area.
+    // ------------------------------------------------------------------
+    const handleCaptionMouseUp = useCallback(async () => {
+        const selection = window.getSelection();
+        const selectedText = selection?.toString().trim() ?? '';
+        if (!selectedText || selectedText.length < 2) return;
+
+        // Only act if selection is inside the caption container
+        if (captionRef.current && selection?.rangeCount) {
+            const range = selection.getRangeAt(0);
+            const rect = range.getBoundingClientRect();
+            if (!captionRef.current.contains(range.commonAncestorContainer)) return;
+
+            const fromCode = LANG_CODE[lessonLanguage] ?? 'en';
+            const toCode = LANG_CODE[nativeLanguage] ?? 'en';
+            const isSame = fromCode === toCode;
+
+            // Show tooltip immediately with loading state
+            setTooltip({
+                visible: true,
+                selectedText,
+                translation: null,
+                loading: !isSame,
+                sameLanguage: isSame,
+                position: { x: rect.left + rect.width / 2, y: rect.top },
+            });
+
+            selection.removeAllRanges();
+
+            if (isSame) return; // no API call needed
+
+            try {
+                const apiUrl = import.meta.env.VITE_API_URL || 'http://localhost:8080';
+                const res = await fetch(`${apiUrl}/api/translate`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ text: selectedText, fromLang: fromCode, toLang: toCode }),
+                });
+                const data = await res.json();
+                setTooltip(prev => ({
+                    ...prev,
+                    loading: false,
+                    translation: data.translation ?? null,
+                    sameLanguage: !!data.same,
+                }));
+            } catch {
+                setTooltip(prev => ({ ...prev, loading: false, translation: null }));
+            }
+        }
+    }, [lessonLanguage, nativeLanguage]);
+
+    const closeTooltip = () => setTooltip(prev => ({ ...prev, visible: false }));
+
     return (
         <div className="flex-1 flex flex-col items-center justify-center px-4 relative z-0">
+
+            {/* Translation tooltip */}
+            {tooltip.visible && (
+                <TranslationTooltip
+                    text={tooltip.selectedText}
+                    translation={tooltip.translation}
+                    loading={tooltip.loading}
+                    sameLanguage={tooltip.sameLanguage}
+                    position={tooltip.position}
+                    onClose={closeTooltip}
+                />
+            )}
 
             {/* Countdown Timer */}
             <div className={`absolute top-16 right-6 px-4 py-2 rounded-full text-sm font-mono font-bold border backdrop-blur-md ${timerUrgent
@@ -165,18 +336,28 @@ function ActiveClassroom() {
                 </div>
             </div>
 
-            {/* Real-time Closed Captions */}
+            {/* Real-time Closed Captions — selectable for translation */}
             {captionLines.length > 0 && (
-                <div className="w-full max-w-2xl mx-auto px-4 mb-4 flex flex-col items-center gap-1">
+                <div
+                    ref={captionRef}
+                    onMouseUp={handleCaptionMouseUp}
+                    className="w-full max-w-2xl mx-auto px-4 mb-4 flex flex-col items-center gap-1 select-text cursor-text"
+                    title={nativeLanguage ? 'Select any word or phrase to translate' : ''}
+                >
                     {captionLines.map((t, i) => (
                         <p key={i} className="text-sm text-center text-white bg-black/60 backdrop-blur-sm rounded px-3 py-1 leading-relaxed">
                             {t.text}
                         </p>
                     ))}
+                    {nativeLanguage && (
+                        <p className="text-[10px] text-slate-500 mt-0.5 select-none">
+                            Select text to translate → {nativeLanguage}
+                        </p>
+                    )}
                 </div>
             )}
 
-            {/* Camera preview — shown when camera is on */}
+            {/* Camera preview */}
             {localCameraTrack && (
                 <div className="absolute bottom-24 right-6 w-36 h-24 rounded-xl overflow-hidden border border-white/20 shadow-xl">
                     <VideoTrack trackRef={localCameraTrack} className="w-full h-full object-cover scale-x-[-1]" />
