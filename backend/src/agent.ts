@@ -48,7 +48,8 @@ ${prompt_practice}
 ${prompt_roleplay}
 
 IMPORTANT RULES:
-- Transition naturally between moments. Announce each transition briefly (e.g. "Great! Now let's practice together." / "Perfect! Let's try a real conversation now.").
+- Transition naturally between moments WITHOUT pausing. When you finish one moment, immediately begin the next — do not wait for the student to prompt you.
+- Always end every single turn with either a direct question to the student, a prompt to respond, or an explicit instruction like "Your turn!". Never end a turn with a statement that doesn't invite a response.
 - Always give immediate, specific feedback on pronunciation, vocabulary, and grammar errors.
 - Keep energy warm, encouraging, and professional.
 - When you are approaching the end of the session (around 13 minutes), wrap up the roleplay and give the student a brief overall summary of what they practiced and one key thing to remember.`;
@@ -61,7 +62,7 @@ IMPORTANT RULES:
 
         try {
             const realtimeModel = new google.beta.realtime.RealtimeModel({
-                model: 'gemini-2.5-flash-native-audio-preview-12-2025',
+                model: 'gemini-2.5-flash-native-audio-preview-09-2025',
                 instructions: systemPrompt,
                 voice: agentVoice
             });

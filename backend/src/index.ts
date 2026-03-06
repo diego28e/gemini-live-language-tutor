@@ -135,33 +135,17 @@ app.post('/api/livekit-webhook', async (req: express.Request, res: express.Respo
         const roomName = event.room?.name;
         if (!roomName || !process.env.DATABASE_URL) return res.sendStatus(200);
 
-        if (event.event === 'participant_left' || event.event === 'room_finished') {
-            // Mark session completed
-            await pool.query(`
-                UPDATE Sessions SET status = 'completed', ended_at = CURRENT_TIMESTAMP,
-                    duration_seconds = EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - created_at))::INTEGER
-                WHERE livekit_room_name = $1 AND status = 'started'
-            `, [roomName]);
-        }
-
         if (event.event === 'participant_left') {
-            // Schedule silence timeout check — if room still active after 2 min, terminate
+            // Schedule silence timeout check — if room still active after 2 min with no activity, mark timeout
             setTimeout(async () => {
                 try {
-                    const result = await pool.query(
-                        `SELECT id FROM Sessions WHERE livekit_room_name = $1 AND status = 'started'
+                    await pool.query(
+                        `UPDATE Sessions SET status = 'timeout', ended_at = CURRENT_TIMESTAMP,
+                         duration_seconds = EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - created_at))::INTEGER
+                         WHERE livekit_room_name = $1 AND status = 'started'
                          AND last_activity_at < CURRENT_TIMESTAMP - INTERVAL '2 minutes'`,
                         [roomName]
                     );
-                    if (result.rows.length > 0) {
-                        await pool.query(
-                            `UPDATE Sessions SET status = 'timeout', ended_at = CURRENT_TIMESTAMP,
-                             duration_seconds = EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - created_at))::INTEGER
-                             WHERE livekit_room_name = $1 AND status = 'started'`,
-                            [roomName]
-                        );
-                        console.log(`[webhook] Session timed out due to silence: ${roomName}`);
-                    }
                 } catch (e) {
                     console.error('[webhook] Silence timeout check error:', e);
                 }
