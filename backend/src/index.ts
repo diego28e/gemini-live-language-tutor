@@ -160,7 +160,7 @@ app.post('/api/token', async (req: express.Request, res: express.Response): Prom
 
             const fresh = await pool.query('SELECT credits_remaining FROM Users WHERE id = $1', [user.id]);
             if (fresh.rows[0].credits_remaining <= 0) {
-                return res.status(403).json({ error: 'No credits remaining. Credits reset on the 1st of each month.' });
+                return res.status(402).json({ error: 'No credits remaining. Credits reset on the 1st of each month.' });
             }
 
             await pool.query('UPDATE Users SET credits_remaining = credits_remaining - 1 WHERE id = $1', [user.id]);
