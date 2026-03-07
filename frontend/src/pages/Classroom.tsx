@@ -134,6 +134,11 @@ export default function Classroom() {
             return;
         }
 
+        // AbortController ensures that if React StrictMode (dev) or a fast navigation
+        // causes this effect to run twice, the first in-flight fetch is cancelled on
+        // unmount before it can create a duplicate session or deduct a credit.
+        const controller = new AbortController();
+
         const initRoom = async () => {
             try {
                 const idToken = await auth.currentUser!.getIdToken();
@@ -146,6 +151,7 @@ export default function Classroom() {
                         'Authorization': `Bearer ${idToken}`,
                     },
                     body: JSON.stringify({ lessonId }),
+                    signal: controller.signal,   // ← abort hook
                 });
 
                 if (res.status === 402) {
@@ -160,18 +166,25 @@ export default function Classroom() {
                 setNativeLanguage(data.nativeLanguage ?? '');
 
                 // Fetch lesson language for translation direction
-                const lessonsRes = await fetch(`${apiUrl}/api/lessons`);
+                const lessonsRes = await fetch(`${apiUrl}/api/lessons`, {
+                    signal: controller.signal,
+                });
                 if (lessonsRes.ok) {
                     const lessons = await lessonsRes.json();
                     const lesson = lessons.find((l: { id: string; language: string }) => l.id === lessonId);
                     if (lesson) setLessonLanguage(lesson.language ?? '');
                 }
             } catch (err: any) {
+                // AbortError is expected on StrictMode unmount — not a real error
+                if (err.name === 'AbortError') return;
                 setError(err.message);
             }
         };
 
         initRoom();
+
+        // Cleanup: abort any pending fetches when the component unmounts
+        return () => controller.abort();
     }, [lessonId, navigate]);
 
     if (noCredits) return <NoCreditsScreen />;
