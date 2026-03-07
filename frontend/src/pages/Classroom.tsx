@@ -240,7 +240,7 @@ export default function Classroom() {
 // ---------------------------------------------------------------------------
 // Custom classroom container using LiveKit hooks
 // ---------------------------------------------------------------------------
-const SESSION_SECONDS = 15 * 60;
+const SESSION_SECONDS = 5 * 60;
 
 interface ActiveClassroomProps {
     nativeLanguage: string;

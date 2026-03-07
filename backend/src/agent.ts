@@ -9,7 +9,7 @@ import sharp from 'sharp';
 
 dotenv.config();
 
-const SESSION_LIMIT_MS = 15 * 60 * 1000; // 15 minutes hard stop
+const SESSION_LIMIT_MS = 5 * 60 * 1000; // 5 minutes hard stop
 
 export default defineAgent({
     entry: async (ctx: JobContext) => {
@@ -37,17 +37,17 @@ export default defineAgent({
                         console.log(`[agent] Loaded lesson: ${title} (${language})`);
 
                         // Build composite prompt with all 3 moments
-                        systemPrompt = `You are an expert ${language} tutor running a 12-minute lesson called "${title}" at CEFR level ${cefr_level}. This is a voice session — speak naturally at all times.
+                        systemPrompt = `You are an expert ${language} tutor running a 5-minute lesson called "${title}" at CEFR level ${cefr_level}. This is a voice session — speak naturally at all times.
 
 The lesson has three moments. Move through them in order without announcing transitions.
 
-MOMENT 1 — PRESENTATION (2 minutes):
+MOMENT 1 — PRESENTATION (1 minute):
 ${prompt_presentation}
 
-MOMENT 2 — GUIDED PRACTICE (5 minutes):
+MOMENT 2 — GUIDED PRACTICE (2 minutes):
 ${prompt_practice}
 
-MOMENT 3 — CONVERSATION OR ROLEPLAY (3 minutes):
+MOMENT 3 — CONVERSATION OR ROLEPLAY (2 minutes):
 ${prompt_roleplay}
 
 BEHAVIORAL RULES:
@@ -196,11 +196,11 @@ Pacing: When Moment 3 feels complete, deliver a short spoken debrief — one thi
                 }
             }
 
-            // 15-minute hard stop
+            // 5-minute hard stop
             const hardStopTimer = setTimeout(async () => {
-                console.log(`[agent] 15-minute session limit reached for room: ${roomName}`);
+                console.log(`[agent] 5-minute session limit reached for room: ${roomName}`);
                 try {
-                    session.say("We've reached the end of our 15-minute session! Great work today. Keep practicing and see you next time!");
+                    session.say("We've reached the end of our 5-minute session! Great work today. Keep practicing and see you next time!");
                 } catch (_) { }
                 setTimeout(() => session.close(), 5000);
             }, SESSION_LIMIT_MS);
