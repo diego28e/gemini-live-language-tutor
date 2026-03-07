@@ -116,10 +116,16 @@ export default function Dashboard() {
     const navigate = useNavigate();
 
     useEffect(() => {
+        // `cancelled` prevents state updates if StrictMode unmounts this mount
+        // before the async init chain finishes (defence-in-depth alongside the
+        // singleton promise fix in firebase.ts).
+        let cancelled = false;
+
         const init = async () => {
             try {
-                // 1. Sign in anonymously if needed
-                if (!auth.currentUser) await signIn();
+                // 1. Sign in anonymously if needed (singleton-guarded — safe to call concurrently)
+                await signIn();
+                if (cancelled) return;
 
                 // 2. Check if onboarding is complete (localStorage fast-path, then API)
                 const cachedLang = localStorage.getItem('nativeLanguage');
@@ -127,31 +133,35 @@ export default function Dashboard() {
                     try {
                         const apiUrl = import.meta.env.VITE_API_URL || 'http://localhost:8080';
                         const idToken = await auth.currentUser!.getIdToken();
+                        if (cancelled) return;
                         const res = await fetch(`${apiUrl}/api/user`, {
                             headers: { Authorization: `Bearer ${idToken}` },
                         });
+                        if (cancelled) return;
                         if (!res.ok) {
                             // 404 = needs onboarding
                             setShowOnboarding(true);
                         }
                         // else: user exists and has native_language set → skip modal
                     } catch (_) {
-                        setShowOnboarding(true);
+                        if (!cancelled) setShowOnboarding(true);
                     }
                 }
 
                 // 3. Fetch lessons
                 const apiUrl = import.meta.env.VITE_API_URL || 'http://localhost:8080';
                 const res = await fetch(`${apiUrl}/api/lessons`);
-                if (res.ok) setLessons(await res.json());
+                if (!cancelled && res.ok) setLessons(await res.json());
             } catch (err) {
                 console.error('Dashboard init error:', err);
             } finally {
-                setLoading(false);
+                if (!cancelled) setLoading(false);
             }
         };
         init();
+        return () => { cancelled = true; };
     }, []);
+
 
     const handleOnboardingComplete = (lang: string) => {
         console.log(`[onboard] Native language set to: ${lang}`);
