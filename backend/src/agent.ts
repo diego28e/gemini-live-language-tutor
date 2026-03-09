@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { VideoStream, VideoBufferType, TrackKind } from '@livekit/rtc-node';
 import type { Track } from '@livekit/rtc-node';
 import sharp from 'sharp';
+import { runEvaluation } from './evaluator.js';
 
 dotenv.config();
 
@@ -22,33 +23,59 @@ export default defineAgent({
         let systemPrompt = "You are a helpful language tutor. Keep your answers concise.";
         let agentVoice = "Aoede";
 
+        // Lesson context stored for use in the evaluator
+        let lessonContext: {
+            language: string;
+            grammar_focus: string;
+            vocab_focus: string | null;
+            cefr_level: string;
+        } | null = null;
+
         const parts = roomName.split('-');
-        if (parts.length >= 7 && parts[0] === 'l') {
+        // Room name format: l-{UUID} → split produces 6 parts (l + 5 UUID segments)
+        console.log(`[agent] Room name: ${roomName} → ${parts.length} parts; parsing lesson ID...`);
+        if (parts.length >= 6 && parts[0] === 'l') {
             const dbLessonId = `${parts[1]}-${parts[2]}-${parts[3]}-${parts[4]}-${parts[5]}`;
             try {
                 if (process.env.DATABASE_URL) {
                     console.log(`[agent] Fetching instructions for lesson ID: ${dbLessonId}`);
                     const result = await pool.query(
-                        'SELECT title, prompt_presentation, prompt_practice, prompt_roleplay, language, cefr_level FROM Lessons WHERE id = $1',
+                        `SELECT title, grammar_focus, vocab_focus, cefr_level, language,
+                                moment_1_presentation, moment_2_practice, moment_3_conversation
+                         FROM Lessons WHERE id = $1`,
                         [dbLessonId]
                     );
                     if (result.rows.length > 0) {
-                        const { title, prompt_presentation, prompt_practice, prompt_roleplay, language, cefr_level } = result.rows[0];
+                        const {
+                            title,
+                            grammar_focus,
+                            vocab_focus,
+                            cefr_level,
+                            language,
+                            moment_1_presentation,
+                            moment_2_practice,
+                            moment_3_conversation,
+                        } = result.rows[0];
+
+                        lessonContext = { language, grammar_focus, vocab_focus, cefr_level };
                         console.log(`[agent] Loaded lesson: ${title} (${language})`);
 
-                        // Build composite prompt with all 3 moments
                         systemPrompt = `You are an expert ${language} tutor running a 5-minute lesson called "${title}" at CEFR level ${cefr_level}. This is a voice session — speak naturally at all times.
 
 The lesson has three moments. Move through them in order without announcing transitions.
 
 MOMENT 1 — PRESENTATION (1 minute):
-${prompt_presentation}
+${moment_1_presentation}
 
 MOMENT 2 — GUIDED PRACTICE (2 minutes):
-${prompt_practice}
+${moment_2_practice}
 
 MOMENT 3 — CONVERSATION OR ROLEPLAY (2 minutes):
-${prompt_roleplay}
+${moment_3_conversation}
+
+TARGET LANGUAGE FOCUS:
+- Grammar: ${grammar_focus}
+${vocab_focus ? `- Key vocabulary: ${vocab_focus}` : ''}
 
 BEHAVIORAL RULES:
 
@@ -74,7 +101,9 @@ Pacing: When Moment 3 feels complete, deliver a short spoken debrief — one thi
                 instructions: systemPrompt,
                 voice: agentVoice,
                 // Enable Gemini's own output transcription so we can forward it word-by-word
-                outputAudioTranscription: {}
+                outputAudioTranscription: {},
+                // Enable input transcription for student speech in transcript
+                inputAudioTranscription: {},
             });
 
             const agent = new voice.Agent({
@@ -88,11 +117,15 @@ Pacing: When Moment 3 feels complete, deliver a short spoken debrief — one thi
 
             console.log("[agent] Agent started successfully.");
 
-            // ── Real-time Closed Captions ──────────────────────────────────────────
+            // ── Transcript accumulation ────────────────────────────────────────────
+            // Key: segmentId (one per agent turn). Updated on EVERY word chunk so
+            // that if the stream is aborted (hard-stop), we already have the text
+            // accumulated up to that point — no data loss on abrupt closes.
+            const agentTurns = new Map<string, string>();
+
+            // ── Real-time Closed Captions + Agent transcript ───────────────────────
             // The underlying RealtimeSession emits 'generation_created' for every response turn.
             // Each generation exposes a textStream where outputTranscription chunks land word-by-word.
-            // We read that stream and publish each chunk via LiveKit's built-in transcription data channel
-            // so the frontend can pick them up with useTranscriptions().
             const realtimeSession = (realtimeModel as any)._session as (llm.RealtimeSession | undefined);
             const room = ctx.room!;
             const localParticipant = room.localParticipant!;
@@ -105,10 +138,9 @@ Pacing: When Moment 3 feels complete, deliver a short spoken debrief — one thi
                             while (true) {
                                 const { done: msgDone, value: msg } = await reader.read();
                                 if (msgDone || !msg) break;
-                                // Each msg is a MessageGeneration with its own textStream
                                 const { messageId, textStream } = msg;
                                 const textReader = textStream.getReader();
-                                let segmentId = messageId;
+                                const segmentId = messageId;
                                 let accumulator = '';
                                 while (true) {
                                     const { done: textDone, value: chunk } = await textReader.read();
@@ -117,8 +149,9 @@ Pacing: When Moment 3 feels complete, deliver a short spoken debrief — one thi
                                     const text = typeof chunk === 'string' ? chunk : (chunk as any).text ?? '';
                                     if (!text) continue;
                                     accumulator += text;
-                                    // Publish each word chunk as a non-final segment so the frontend
-                                    // shows it immediately while the agent is speaking
+                                    // ↓ Update Map on EVERY word — captured even if stream is aborted
+                                    agentTurns.set(segmentId, accumulator);
+                                    // Publish non-final caption for real-time display
                                     localParticipant.publishTranscription({
                                         participantIdentity: localParticipant.identity,
                                         trackSid: '',
@@ -132,8 +165,9 @@ Pacing: When Moment 3 feels complete, deliver a short spoken debrief — one thi
                                         }]
                                     });
                                 }
-                                // Mark the last segment as final when the turn ends
+                                // Publish final caption when the turn ends cleanly
                                 if (accumulator) {
+                                    agentTurns.set(segmentId, accumulator);
                                     localParticipant.publishTranscription({
                                         participantIdentity: localParticipant.identity,
                                         trackSid: '',
@@ -148,13 +182,14 @@ Pacing: When Moment 3 feels complete, deliver a short spoken debrief — one thi
                                     });
                                 }
                             }
-                        } catch (e) {
-                            // Silently ignore — stream may close on barge-in
+                        } catch (_) {
+                            // Stream closed on barge-in or hard-stop — Map already holds the text
                         }
                     })();
                 });
+
             } else {
-                console.warn('[agent] Could not access RealtimeSession for captions. The agent session may be structured differently.');
+                console.warn('[agent] Could not access RealtimeSession for captions/transcript.');
             }
             // ──────────────────────────────────────────────────────────────────────
 
@@ -187,7 +222,6 @@ Pacing: When Moment 3 feels complete, deliver a short spoken debrief — one thi
             ctx.room!.on('trackSubscribed', (track, _pub, _participant) => {
                 if (track.kind === TrackKind.KIND_VIDEO) startVideoStream(track);
             });
-            // Handle camera already published before agent joined
             for (const participant of ctx.room!.remoteParticipants.values()) {
                 for (const pub of participant.trackPublications.values()) {
                     if (pub.track && pub.track.kind === TrackKind.KIND_VIDEO) {
@@ -202,30 +236,49 @@ Pacing: When Moment 3 feels complete, deliver a short spoken debrief — one thi
                 try {
                     session.say("We've reached the end of our 5-minute session! Great work today. Keep practicing and see you next time!");
                 } catch (_) { }
-                setTimeout(() => session.close(), 5000);
+
+                setTimeout(async () => {
+                    // Signal the frontend to navigate away immediately (before the participant
+                    // fully disconnects, which can take ~30s through the LiveKit process shutdown)
+                    try {
+                        const lp = ctx.room!.localParticipant;
+                        if (lp) {
+                            await lp.publishData(
+                                Buffer.from(JSON.stringify({ type: 'session_ended' })),
+                                { reliable: true }
+                            );
+                            console.log('[agent] session_ended data message sent to frontend');
+                        }
+                    } catch (_) { }
+
+                    session.close();
+                }, 5000);
             }, SESSION_LIMIT_MS);
 
             session.on(voice.AgentSessionEventTypes.Close, async () => {
                 clearTimeout(hardStopTimer);
-                // Finalize session and write metrics
-                if (process.env.DATABASE_URL) {
-                    try {
-                        const sessionResult = await pool.query(
-                            `UPDATE Sessions SET status = 'completed', ended_at = CURRENT_TIMESTAMP,
+                console.log(`[agent] Session closed for room: ${roomName}`);
+
+                if (!process.env.DATABASE_URL) {
+                    console.warn('[agent] DATABASE_URL not set — skipping session finalization');
+                    return;
+                }
+
+                try {
+                    // Mark session completed. The frontend submits the transcript and
+                    // triggers the evaluator via POST /api/sessions/:id/transcript.
+                    const sessionResult = await pool.query(
+                        `UPDATE Sessions
+                         SET status = 'completed',
+                             ended_at = CURRENT_TIMESTAMP,
                              duration_seconds = EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - created_at))::INTEGER
-                             WHERE livekit_room_name = $1 AND status = 'started' RETURNING id`,
-                            [roomName]
-                        );
-                        if (sessionResult.rows.length > 0) {
-                            const sessionId = sessionResult.rows[0].id;
-                            await pool.query(
-                                'INSERT INTO Metrics (session_id) VALUES ($1)',
-                                [sessionId]
-                            );
-                        }
-                    } catch (e) {
-                        console.error('[agent] Error writing session/metrics:', e);
-                    }
+                         WHERE livekit_room_name = $1 AND status = 'started'
+                         RETURNING id`,
+                        [roomName]
+                    );
+                    console.log(`[agent] Sessions UPDATE matched ${sessionResult.rows.length} row(s)`);
+                } catch (e) {
+                    console.error('[agent] Error finalizing session:', e);
                 }
             });
 

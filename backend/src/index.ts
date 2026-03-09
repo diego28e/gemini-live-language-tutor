@@ -1,10 +1,11 @@
 import express from 'express';
 import cors from 'cors';
-import { AccessToken, WebhookReceiver } from 'livekit-server-sdk';
-import admin from 'firebase-admin';
 import dotenv from 'dotenv';
+import admin from 'firebase-admin';
+import { AccessToken, WebhookReceiver } from 'livekit-server-sdk';
 import { v4 as uuidv4 } from 'uuid';
 import { pool } from './db.js';
+import { runEvaluation } from './evaluator.js';
 
 dotenv.config();
 
@@ -48,7 +49,7 @@ async function verifyToken(req: express.Request): Promise<string | null> {
 async function ensureCreditsReset(userId: string) {
     await pool.query(`
         UPDATE Users
-        SET credits_remaining = CASE plan WHEN 'plus' THEN 12 ELSE 8 END,
+        SET credits_remaining = CASE plan WHEN 'plus' THEN 30 ELSE 20 END,
             credits_reset_at = date_trunc('month', CURRENT_TIMESTAMP) + INTERVAL '1 month'
         WHERE id = $1 AND credits_reset_at <= CURRENT_TIMESTAMP
     `, [userId]);
@@ -137,6 +138,7 @@ app.post('/api/token', async (req: express.Request, res: express.Response): Prom
         let userId = 'anonymous-' + uuidv4().substring(0, 8);
         let dbUserId: string | null = null;
         let nativeLanguage: string | null = null;
+        let sessionId: string | null = null;
 
         if (firebaseUid && process.env.DATABASE_URL) {
             let email: string | null = null;
@@ -169,10 +171,11 @@ app.post('/api/token', async (req: express.Request, res: express.Response): Prom
         const roomName = `l-${lessonId}-${uuidv4().substring(0, 8)}`;
 
         if (process.env.DATABASE_URL) {
-            await pool.query(
-                'INSERT INTO Sessions (user_id, lesson_id, livekit_room_name, status) VALUES ($1, $2, $3, $4)',
+            const sessionInsert = await pool.query(
+                'INSERT INTO Sessions (user_id, lesson_id, livekit_room_name, status) VALUES ($1, $2, $3, $4) RETURNING id',
                 [dbUserId, lessonId, roomName, 'started']
             );
+            sessionId = sessionInsert.rows[0]?.id ?? null;
         }
 
         const at = new AccessToken(apiKey, apiSecret, {
@@ -182,11 +185,117 @@ app.post('/api/token', async (req: express.Request, res: express.Response): Prom
         at.addGrant({ roomJoin: true, room: roomName, canPublish: true, canSubscribe: true });
         const token = await at.toJwt();
 
-        // Return nativeLanguage so Classroom can use it for translation without an extra round-trip
-        res.json({ token, roomName, userId, lessonId, nativeLanguage });
+        // Return nativeLanguage + sessionId so frontend can submit transcript on exit
+        res.json({ token, roomName, userId, lessonId, nativeLanguage, sessionId });
     } catch (err: any) {
         console.error('Error generating token:', err);
         res.status(500).json({ error: err.message });
+    }
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/sessions/:sessionId/transcript
+// Called by the frontend just before the user navigates away.
+// Saves the transcript and fires the evaluator as a background job.
+// ---------------------------------------------------------------------------
+app.post('/api/sessions/:sessionId/transcript', async (req: express.Request, res: express.Response): Promise<any> => {
+    const firebaseUid = await verifyToken(req);
+    if (!firebaseUid) return res.status(401).json({ error: 'Unauthorized' });
+
+    const { transcript } = req.body;
+    if (!transcript || typeof transcript !== 'string') {
+        return res.status(400).json({ error: 'transcript must be a non-empty string' });
+    }
+    console.log(`[transcript] Received for session ${req.params.sessionId} — ${transcript.length} chars, ${transcript.split('\n').length} lines`);
+    console.log(`[transcript] Preview: ${transcript.substring(0, 200)}`);
+
+    if (!process.env.DATABASE_URL) return res.json({ ok: true });
+
+    try {
+        // Save transcript to the session
+        const sessionResult = await pool.query(
+            `UPDATE Sessions SET full_transcript = $2
+             WHERE id = $1
+             RETURNING id, lesson_id`,
+            [req.params.sessionId, transcript]
+        );
+
+        if (sessionResult.rows.length === 0) {
+            return res.status(404).json({ error: 'Session not found' });
+        }
+
+        const { lesson_id } = sessionResult.rows[0];
+
+        // Get lesson context and fire evaluator (fire-and-forget)
+        const lessonResult = await pool.query(
+            'SELECT language, grammar_focus, vocab_focus, cefr_level FROM Lessons WHERE id = $1',
+            [lesson_id]
+        );
+
+        if (lessonResult.rows.length > 0) {
+            console.log(`[transcript] Firing evaluator for session ${req.params.sessionId}...`);
+            runEvaluation(req.params.sessionId as string, transcript, lessonResult.rows[0]);
+        }
+
+        res.json({ ok: true });
+    } catch (e: any) {
+        console.error('[transcript] Error:', e);
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// ---------------------------------------------------------------------------
+// GET /api/lessons/:lessonId/evaluation
+// Returns the latest evaluation for the current user's most recent completed
+// session of this lesson.
+// Response: { status: 'none' | 'pending' | 'completed', evaluation?: {...} }
+// ---------------------------------------------------------------------------
+app.get('/api/lessons/:lessonId/evaluation', async (req: express.Request, res: express.Response): Promise<any> => {
+    const firebaseUid = await verifyToken(req);
+    if (!firebaseUid) return res.status(401).json({ error: 'Unauthorized' });
+
+    if (!process.env.DATABASE_URL) return res.json({ status: 'none' });
+
+    try {
+        // Find the most recently completed session for this lesson/user
+        const result = await pool.query(
+            `SELECT s.id AS session_id, s.status,
+                    se.overall_score, se.grammar_corrections, se.vocabulary_notes,
+                    se.strengths_summary, se.next_steps_recommendation, se.evaluated_at
+             FROM Users u
+             JOIN Sessions s ON s.user_id = u.id
+             LEFT JOIN Session_Evaluations se ON se.session_id = s.id
+             WHERE u.firebase_uid = $1
+               AND s.lesson_id = $2
+               AND s.status = 'completed'
+             ORDER BY s.created_at DESC
+             LIMIT 1`,
+            [firebaseUid, req.params.lessonId]
+        );
+
+        if (result.rows.length === 0) {
+            return res.json({ status: 'none' });
+        }
+
+        const row = result.rows[0];
+        if (!row.evaluated_at) {
+            // Session completed but evaluator hasn't finished yet
+            return res.json({ status: 'pending' });
+        }
+
+        return res.json({
+            status: 'completed',
+            evaluation: {
+                overall_score: row.overall_score,
+                grammar_corrections: row.grammar_corrections,
+                vocabulary_notes: row.vocabulary_notes,
+                strengths_summary: row.strengths_summary,
+                next_steps_recommendation: row.next_steps_recommendation,
+                evaluated_at: row.evaluated_at,
+            },
+        });
+    } catch (e: any) {
+        res.status(500).json({ error: e.message });
     }
 });
 
@@ -198,7 +307,9 @@ app.get('/api/lessons', async (req: express.Request, res: express.Response): Pro
         if (!process.env.DATABASE_URL) {
             return res.json([{ id: 'mock-1', title: 'Mock Ordering Food', cefr_level: 'A2', language: 'English' }]);
         }
-        const result = await pool.query('SELECT id, title, cefr_level, grammar_focus, language FROM Lessons');
+        const result = await pool.query(
+            'SELECT id, title, cefr_level, grammar_focus, vocab_focus, language FROM Lessons'
+        );
         res.json(result.rows);
     } catch (e: any) {
         res.status(500).json({ error: e.message });

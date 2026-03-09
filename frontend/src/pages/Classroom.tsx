@@ -10,8 +10,10 @@ import {
     useTracks,
     VideoTrack,
     useTranscriptions,
+    useConnectionState,
+    useRoomContext,
 } from '@livekit/components-react';
-import { Track } from 'livekit-client';
+import { Track, ConnectionState, RoomEvent, type TranscriptionSegment } from 'livekit-client';
 import { auth } from '../firebase';
 import { ArrowLeft, Loader2, Languages, X } from 'lucide-react';
 import Lottie from 'lottie-react';
@@ -127,6 +129,7 @@ export default function Classroom() {
     const [noCredits, setNoCredits] = useState(false);
     const [nativeLanguage, setNativeLanguage] = useState<string>('');
     const [lessonLanguage, setLessonLanguage] = useState<string>('');
+    const [sessionId, setSessionId] = useState<string | null>(null);
 
     useEffect(() => {
         if (!auth.currentUser) {
@@ -164,6 +167,7 @@ export default function Classroom() {
                 const data = await res.json();
                 setToken(data.token);
                 setNativeLanguage(data.nativeLanguage ?? '');
+                setSessionId(data.sessionId ?? null);
 
                 // Fetch lesson language for translation direction
                 const lessonsRes = await fetch(`${apiUrl}/api/lessons`, {
@@ -212,15 +216,9 @@ export default function Classroom() {
         <div className="flex flex-col h-screen bg-slate-950 text-white relative overflow-hidden">
             <div className="absolute inset-0 bg-gradient-to-b from-indigo-900/10 to-slate-950/90 pointer-events-none" />
 
-            <header className="absolute top-0 w-full p-4 flex items-center justify-between z-10">
-                <button
-                    onClick={() => navigate('/')}
-                    className="flex items-center gap-2 px-4 py-2 bg-white/5 hover:bg-white/10 border border-white/10 rounded-full transition-colors backdrop-blur-md text-sm font-medium"
-                >
-                    <ArrowLeft className="w-4 h-4" /> Exit Lesson
-                </button>
-            </header>
 
+
+            {/* Exit button rendered inside the room so it has access to LiveKit hooks */}
             <LiveKitRoom
                 video={false}
                 audio={true}
@@ -229,7 +227,11 @@ export default function Classroom() {
                 connect={true}
                 className="flex-1 flex flex-col"
             >
-                <ActiveClassroom nativeLanguage={nativeLanguage} lessonLanguage={lessonLanguage} />
+                <ActiveClassroom
+                    sessionId={sessionId}
+                    nativeLanguage={nativeLanguage}
+                    lessonLanguage={lessonLanguage}
+                />
                 <RoomAudioRenderer />
                 <StartAudio label="Click to allow audio playback" />
             </LiveKitRoom>
@@ -243,6 +245,7 @@ export default function Classroom() {
 const SESSION_SECONDS = 5 * 60;
 
 interface ActiveClassroomProps {
+    sessionId: string | null;
     nativeLanguage: string;
     lessonLanguage: string;
 }
@@ -256,13 +259,87 @@ interface TooltipState {
     position: { x: number; y: number };
 }
 
-function ActiveClassroom({ nativeLanguage, lessonLanguage }: ActiveClassroomProps) {
+function ActiveClassroom({ sessionId, nativeLanguage, lessonLanguage }: ActiveClassroomProps) {
+    const navigate = useNavigate();
+    const room = useRoomContext();
     const { state: agentState, audioTrack: agentAudio } = useVoiceAssistant();
     const transcriptions = useTranscriptions();
+    const connectionState = useConnectionState();
     const [secondsLeft, setSecondsLeft] = useState(SESSION_SECONDS);
     const cameraTracks = useTracks([Track.Source.Camera], { onlySubscribed: false });
     const localCameraTrack = cameraTracks.find(t => t.participant.isLocal && !t.publication.isMuted);
     const captionRef = useRef<HTMLDivElement>(null);
+    const wasConnectedRef = useRef(false);
+
+    // ── Transcript accumulator (professional approach) ───────────────────────
+    // Subscribe to the raw room event — the exact same source that powers captions.
+    // Unlike useTranscriptions() (display hook with TTL eviction), this keeps ALL
+    // committed final segments for the entire session lifetime.
+    const transcriptLines = useRef<string[]>([]);
+    useEffect(() => {
+        const onTranscription = (segments: TranscriptionSegment[]) => {
+            for (const seg of segments) {
+                if (seg.final && (seg.text ?? '').trim()) {
+                    transcriptLines.current.push((seg.text ?? '').trim());
+                    console.log(`[classroom] 📝 turn ${transcriptLines.current.length}: "${seg.text?.substring(0, 70)}"`);
+                }
+            }
+        };
+        room.on(RoomEvent.TranscriptionReceived, onTranscription);
+        return () => { room.off(RoomEvent.TranscriptionReceived, onTranscription); };
+    }, [room]);
+    // ─────────────────────────────────────────────────────────────────────────
+
+    // Submit transcript to backend then navigate away
+    const submitAndNavigate = async () => {
+        const transcript = transcriptLines.current.join('\n');
+        console.log(`[classroom] Submitting transcript — ${transcriptLines.current.length} turns, ${transcript.length} chars`);
+        console.log(`[classroom] Preview: "${transcript.substring(0, 120)}"`);
+        if (sessionId && transcript.length > 0) {
+            try {
+                const idToken = await auth.currentUser?.getIdToken();
+                const apiUrl = import.meta.env.VITE_API_URL || 'http://localhost:8080';
+                await fetch(`${apiUrl}/api/sessions/${sessionId}/transcript`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        ...(idToken ? { Authorization: `Bearer ${idToken}` } : {}),
+                    },
+                    body: JSON.stringify({ transcript }),
+                });
+                console.log('[classroom] Transcript submitted successfully');
+            } catch (e) {
+                console.warn('[classroom] Transcript submission failed (non-blocking):', e);
+            }
+        }
+        navigate('/');
+    };
+
+    // Primary exit path: agent sends a data message when the 5-min hard stop fires.
+    // This is immediate (< 1s) and doesn't depend on participant disconnect timing.
+    useEffect(() => {
+        const handleData = (payload: Uint8Array) => {
+            try {
+                const msg = JSON.parse(new TextDecoder().decode(payload));
+                if (msg.type === 'session_ended') {
+                    console.log('[classroom] session_ended received — submitting transcript and navigating');
+                    void submitAndNavigate();
+                }
+            } catch (_) { }
+        };
+        room.on(RoomEvent.DataReceived, handleData);
+        return () => { room.off(RoomEvent.DataReceived, handleData); };
+    }, [room, navigate]);
+
+    // Fallback: if the room itself disconnects (network drop, server kick, etc.)
+    useEffect(() => {
+        if (connectionState === ConnectionState.Connected) {
+            wasConnectedRef.current = true;
+        }
+        if (wasConnectedRef.current && connectionState === ConnectionState.Disconnected) {
+            navigate('/');
+        }
+    }, [connectionState, navigate]);
 
     const [tooltip, setTooltip] = useState<TooltipState>({
         visible: false,
@@ -345,6 +422,14 @@ function ActiveClassroom({ nativeLanguage, lessonLanguage }: ActiveClassroomProp
 
     return (
         <div className="flex-1 flex flex-col items-center justify-center px-4 relative z-0">
+
+            {/* Exit Lesson button — lives here so it can access useTranscriptions() */}
+            <button
+                onClick={() => void submitAndNavigate()}
+                className="absolute top-4 left-4 z-20 flex items-center gap-2 px-4 py-2 bg-white/5 hover:bg-white/10 border border-white/10 rounded-full transition-colors backdrop-blur-md text-sm font-medium"
+            >
+                <ArrowLeft className="w-4 h-4" /> Exit Lesson
+            </button>
 
             {/* Translation tooltip */}
             {tooltip.visible && (
