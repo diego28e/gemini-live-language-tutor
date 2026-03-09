@@ -1,4 +1,4 @@
-import { GoogleGenAI } from '@google/genai';
+import { GoogleGenAI, Type } from '@google/genai';
 import { pool } from './db.js';
 
 interface LessonContext {
@@ -40,41 +40,49 @@ export async function runEvaluation(
         }
         console.log('[evaluator] ✓ Transcript length OK');
 
-        const evaluatorSystemPrompt = `You are an expert ${lesson.language} linguistic evaluator. Your job is to analyze the transcript of a 5-minute language lesson and generate a highly specific, constructive "Report Card" for the student.
+        const evaluatorSystemPrompt = `You are an expert ${lesson.language} linguistic evaluator assessing a student's performance in a conversational, voice-only language lesson.
 
 LESSON CONTEXT:
 - Target Grammar: ${lesson.grammar_focus}
 - Vocabulary Focus: ${lesson.vocab_focus || 'General vocabulary'}
-- CEFR Level: ${lesson.cefr_level}
+- CEFR Target Level: ${lesson.cefr_level}
 
-RULES:
-1. You must analyze the transcript specifically looking for the student's errors that the real-time tutor may have let slide to maintain conversational flow.
-2. Provide specific quotes of the student's mistakes and the exact corrections.
-3. Your output MUST be a raw JSON object matching the exact structure below. Do not include markdown formatting or conversational text outside the JSON.
+YOUR TASK:
+Analyze the provided speech-to-text transcript and generate a highly specific, constructive "Report Card" for the student. 
+
+EVALUATION RULES:
+1. Identify the Student: Distinguish between the AI Tutor and the Student. ONLY analyze and correct the Student's speech.
+2. Ignore Transcription Artifacts (CRITICAL): The student interacted entirely via voice. Any spelling, capitalization, or punctuation anomalies in the transcript are errors from the speech-to-text system, NOT the student. DO NOT penalize, mention, or provide feedback on spelling, capitalization, or punctuation.
+3. Grading Rubric: Focus the "overall_score" (0-100) strictly on spoken mastery of the Target Grammar, vocabulary usage, and conversational fluency appropriate for their CEFR Level.
+4. Hidden Errors: Catch structural or grammatical spoken mistakes that the real-time tutor may have let slide to maintain conversational flow. 
+5. Empty States: If the student made no spoken grammar or vocabulary errors, leave those arrays completely empty ([]). Do not invent errors to fill the JSON.
 
 EXPECTED JSON OUTPUT FORMAT:
 {
-  "overall_score": <Integer 0-100 based on mastery of Target Grammar and general fluency>,
+  "overall_score": <Integer 0-100>,
   "grammar_corrections": [
     {
-      "original": "<Quote the exact incorrect sentence the student said>",
-      "corrected": "<Provide the correct version>",
+      "original": "<Quote the exact incorrect spoken sentence>",
+      "corrected": "<Provide the grammatically correct spoken version>",
       "explanation": "<Brief 1-sentence explanation of the grammar rule>"
     }
   ],
   "vocabulary_notes": [
     {
-      "word": "<A word the student used incorrectly or a word they should have used>",
-      "context": "<How it was used>",
-      "suggestion": "<Better alternative or correction>"
+      "word": "<A word the student used incorrectly in spoken context, or a word they should have used instead>",
+      "context": "<How it was used in the conversation>",
+      "suggestion": "<Better spoken alternative or correction>"
     }
   ],
-  "strengths_summary": "<2 sentences praising specific things they did well in the transcript>",
-  "next_steps_recommendation": "<1 sentence of actionable advice on what to practice next>"
-}`;
+  "strengths_summary": "<2 sentences praising specific, actual things they did well in the conversation>",
+  "next_steps_recommendation": "<1 sentence of highly actionable advice on what to practice next in their speaking>"
+}
 
-        // gemini-2.5-flash-lite is the confirmed stable GA lite model (July 2025).
-        const EVALUATOR_MODEL = 'gemini-2.5-flash-lite';
+OUTPUT CONSTRAINTS:
+Return ONLY raw JSON. Do not wrap the output in markdown fences (like \`\`\`json) and do not include any conversational filler.`;
+
+        // gemini-2.5-flash is the confirmed stable GA lite model (July 2025).
+        const EVALUATOR_MODEL = 'gemini-2.5-flash';
 
         const ai = new GoogleGenAI({ apiKey });
         console.log(`[evaluator] Calling ${EVALUATOR_MODEL} for session ${sessionId}, transcript length: ${transcript.length}`);
@@ -89,10 +97,50 @@ EXPECTED JSON OUTPUT FORMAT:
                 },
             ],
             config: {
-                systemInstruction: evaluatorSystemPrompt,
-                temperature: 0.3,
+        systemInstruction: evaluatorSystemPrompt,
+        temperature: 0.2, // Lowered slightly from 0.3 to make grading more deterministic
+        responseMimeType: 'application/json',
+        responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+                overall_score: { type: Type.INTEGER },
+                grammar_corrections: {
+                    type: Type.ARRAY,
+                    items: {
+                        type: Type.OBJECT,
+                        properties: {
+                            original: { type: Type.STRING },
+                            corrected: { type: Type.STRING },
+                            explanation: { type: Type.STRING }
+                        },
+                        required: ["original", "corrected", "explanation"]
+                    }
+                },
+                vocabulary_notes: {
+                    type: Type.ARRAY,
+                    items: {
+                        type: Type.OBJECT,
+                        properties: {
+                            word: { type: Type.STRING },
+                            context: { type: Type.STRING },
+                            suggestion: { type: Type.STRING }
+                        },
+                        required: ["word", "context", "suggestion"]
+                    }
+                },
+                strengths_summary: { type: Type.STRING },
+                next_steps_recommendation: { type: Type.STRING }
             },
-        });
+            required: [
+                "overall_score", 
+                "grammar_corrections", 
+                "vocabulary_notes", 
+                "strengths_summary", 
+                "next_steps_recommendation"
+            ]
+        }
+    },
+});
         console.log('[evaluator] ✓ Gemini responded');
 
         let rawText = response.text ?? '';
