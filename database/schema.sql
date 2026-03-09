@@ -3,12 +3,13 @@ CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 CREATE TABLE Users (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     firebase_uid VARCHAR(128) UNIQUE NOT NULL,
-    email VARCHAR(255) UNIQUE,                -- nullable: anonymous users have no email
-    display_name VARCHAR(255),                -- for Google sign-in (future)
-    native_language VARCHAR(50),              -- user's first language, e.g. 'Spanish' — used as translation target
+    email VARCHAR(255) UNIQUE,
+    display_name VARCHAR(255),
+    native_language VARCHAR(50),
     current_cefr_level VARCHAR(10),
     plan VARCHAR(20) NOT NULL DEFAULT 'basic',
-    credits_remaining INTEGER NOT NULL DEFAULT 8,
+    -- Updated for the 5-min, 5x/week model (approx 20 sessions a month)
+    credits_remaining INTEGER NOT NULL DEFAULT 20, 
     credits_reset_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT date_trunc('month', CURRENT_TIMESTAMP) + INTERVAL '1 month'
 );
 
@@ -17,11 +18,11 @@ CREATE TABLE Lessons (
     title VARCHAR(255) NOT NULL,
     cefr_level VARCHAR(10) NOT NULL,
     grammar_focus VARCHAR(255) NOT NULL,
+    vocab_focus VARCHAR(255), -- Nullable, comma-separated list of words/phrases
     language VARCHAR(50) NOT NULL DEFAULT 'English',
-    -- Three-moment prompts
-    prompt_presentation TEXT NOT NULL,   -- moment 1: short explanation/intro
-    prompt_practice TEXT NOT NULL,       -- moment 2: guided repetition + feedback
-    prompt_roleplay TEXT NOT NULL        -- moment 3: spontaneous conversation/roleplay
+    moment_1_presentation TEXT NOT NULL, 
+    moment_2_practice TEXT NOT NULL,
+    moment_3_conversation TEXT NOT NULL 
 );
 
 CREATE TABLE Sessions (
@@ -29,111 +30,160 @@ CREATE TABLE Sessions (
     user_id UUID REFERENCES Users(id) ON DELETE CASCADE,
     lesson_id UUID REFERENCES Lessons(id) ON DELETE CASCADE,
     livekit_room_name VARCHAR(255),
-    status VARCHAR(50) NOT NULL DEFAULT 'started',  -- started | completed | timeout
+    status VARCHAR(50) NOT NULL DEFAULT 'started',
     duration_seconds INTEGER DEFAULT 0,
+    -- Store the raw transcript here for the Evaluator Agent to read later
+    full_transcript TEXT, 
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     ended_at TIMESTAMP WITH TIME ZONE,
     last_activity_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE TABLE Metrics (
+-- Completely revamped to store highly specific, actionable feedback
+CREATE TABLE Session_Evaluations (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     session_id UUID REFERENCES Sessions(id) ON DELETE CASCADE,
-    zpd_adjustments JSONB,
-    grammar_score INTEGER,
-    feedback_notes TEXT
+    overall_score INTEGER CHECK (overall_score >= 0 AND overall_score <= 100),
+    -- Stores an array of { "original": "...", "corrected": "...", "explanation": "..." }
+    grammar_corrections JSONB, 
+    -- Stores an array of { "word": "...", "context": "...", "suggestion": "..." }
+    vocabulary_notes JSONB,
+    strengths_summary TEXT,
+    next_steps_recommendation TEXT,
+    evaluated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
 -- Seed Data
 
--- English Lessons
-INSERT INTO Lessons (title, cefr_level, grammar_focus, language, prompt_presentation, prompt_practice, prompt_roleplay) VALUES
+INSERT INTO Lessons (title, cefr_level, grammar_focus, vocab_focus, language, moment_1_presentation, moment_2_practice, moment_3_conversation) VALUES
 (
   'Ordering Food in a Restaurant',
   'A2',
-  'Present Simple / Request forms',
+  'Polite Requests (I would like / Could I have)',
+  'starter, main course, dessert, bill',
   'English',
-  'You are a friendly English language teacher. Start by briefly explaining to the student that today they will learn how to order food in a restaurant in English. Introduce 4-5 key polite request phrases: "I would like...", "Could I have...", "May I have...", "I will have...", "Can I get...". Give one example sentence for each. Keep it under 2 minutes. Then tell the student you will now practice together.',
-  'You are an English language teacher doing a guided practice drill. The student will practice polite ordering phrases. Give them a food item (e.g. "a coffee") and ask them to make a polite request using one of the target phrases. After each attempt, give immediate feedback: praise correct usage, gently correct errors by modeling the right form, and ask them to repeat it correctly. Do 5-6 rounds with different food items. Track pronunciation, vocabulary, and grammar accuracy.',
-  'You are a waiter at a cozy English restaurant called "The Crown". The student is a customer. Greet them warmly, hand them an imaginary menu with these options: starters (soup, salad), mains (fish and chips, steak sandwich, pasta primavera), desserts (chocolate cake, apple crumble), drinks (water, juice, wine, soda). Take their order naturally, ask follow-up questions a real waiter would ask. If the student uses informal language, gently model the polite form in your response without breaking the roleplay. End the session by summarizing their order and complimenting their English.'
+
+  'S1: Intro topic. Elicit: favorite restaurant food.
+S2: Teach ''I would like'' / ''Could I have'' with 2 examples. Elicit: ask for water politely.
+S3: Introduce Starter, Main Course, Dessert — embed each in a polite request. Elicit each via ordering scenario.
+S4: Elicit asking for the bill politely.',
+
+  'A2 — 5 rounds — target: polite requests (I would like / Could I have).
+Cue type: short and concrete, one food item and one meal course per round.
+Example: "Ask for a chicken sandwich as your main course."',
+
+  'Persona: Arthur, a warm waiter at The Crown, a cozy British restaurant.
+Scenario: Student orders a full 3-course meal using polite requests throughout.
+Success condition: Student orders a starter, main, and dessert, then asks for the bill.
+Opening line: "Good evening, welcome to The Crown. Can I get you started with something to drink?"'
 ),
+
 (
   'Talking About Last Weekend',
   'B1',
-  'Past Simple vs Past Continuous',
+  'Past Simple vs Past Continuous (Interruptions)',
+  'suddenly, while',
   'English',
-  'You are a friendly English teacher. Explain the difference between Past Simple (completed action) and Past Continuous (action in progress at a specific time). Use these examples: "I watched a movie" vs "I was watching a movie when my phone rang." Show the structure: was/were + verb-ing for continuous. Give 2-3 more examples. Keep it brief and clear, then tell the student you will practice together.',
-  'You are an English teacher doing a grammar drill. Give the student a scenario (e.g. "You were cooking dinner. Your friend called. What happened?") and ask them to make a sentence using both tenses. Correct errors immediately by modeling the correct form. Focus on: correct use of was/were, -ing form, and the interruption structure "was doing X when Y happened". Do 5 rounds.',
-  'You are a curious English-speaking friend catching up after the weekend. Ask the student about their weekend naturally. When they answer, ask follow-up questions that naturally require past continuous ("What were you doing when that happened?", "Who were you with?"). If they make tense errors, weave the correction naturally into your response. Keep the conversation warm and spontaneous for 10 exchanges.'
-),
-(
-  'Job Interview Practice',
-  'B2',
-  'Present Perfect / Professional Vocabulary',
-  'English',
-  'You are an English teacher preparing a student for a job interview. Explain the Present Perfect for experience: "I have worked at...", "I have managed...", "I have developed...". Contrast with Past Simple for specific events. Introduce 6 professional vocabulary words: achievements, responsibilities, collaborate, implement, initiative, deadline. Give example sentences. Then tell the student you will practice.',
-  'You are an English teacher doing interview prep drills. Ask the student a common interview question (e.g. "Tell me about your experience with teamwork."). After their answer, give specific feedback on: correct use of Present Perfect vs Past Simple, professional vocabulary usage, and clarity. Model improved versions of their sentences. Do 4-5 questions.',
-  'You are a professional interviewer at a reputable English-speaking company hiring for a general role. Conduct a realistic 10-minute mock interview. Ask 5-6 standard interview questions. React naturally as an interviewer would. At the end, give the student a brief performance summary: what they did well linguistically and one area to improve.'
-);
 
--- Spanish Lessons
-INSERT INTO Lessons (title, cefr_level, grammar_focus, language, prompt_presentation, prompt_practice, prompt_roleplay) VALUES
+  'S1: Intro topic. Elicit: something interesting they did last weekend.
+S2: Teach Past Continuous (action in progress) + Past Simple (interruption) with 1 example. Elicit: were cooking, someone knocked — how do you say that?
+S3: Introduce ''suddenly'' and ''while'' — embed each in the target structure. Elicit each via interruption scenario.
+S4: Teach clause reversal with ''while'' + comma. Elicit: short story starting with ''While I was sleeping...''',
+
+  'B1 — 5 rounds — target: Past Continuous interrupted by Past Simple.
+Cue type: semi-open scenario. Student must produce a full two-clause sentence.
+Example: "Tell me what you were doing when the power went out."',
+
+  'Persona: Sam, an upbeat friend catching up over coffee.
+Scenario: Sam wants to hear about a crazy weekend event. Student tells the story using past continuous and past simple naturally.
+Success condition: Student tells a coherent short story with at least two uses of the interruption structure.
+Opening line: "Hey! So good to see you. I heard you had a wild weekend — what on earth happened?"'
+),
+
 (
-  'Comprando Ropa (Buying Clothes)',
+  'Comprando Ropa',
   'A2',
   'Adjective agreement / Colors',
+  'camisa, zapatos, falda, chaqueta, blusa, pantalones, rojo, azul, verde, negro, blanco, marrón, gris',
   'Spanish',
-  'Eres un profesor de español amigable. Explica brevemente el acuerdo de adjetivos en español: los adjetivos deben concordar en género y número con el sustantivo. Ejemplos: "una camisa roja", "unos zapatos negros", "una falda azul". Presenta 8 colores y 6 prendas de ropa clave. Muestra cómo combinarlos. Luego dile al estudiante que van a practicar juntos.',
-  'Eres un profesor de español haciendo ejercicios de práctica guiada. Muestra al estudiante una prenda imaginaria (ej: "una chaqueta") y un color (ej: "verde") y pídele que forme una frase correcta. Corrige inmediatamente los errores de concordancia modelando la forma correcta. Haz 6 rondas con diferentes combinaciones de prendas y colores.',
-  'Eres un dependiente en una tienda de ropa española llamada "Moda Madrid". El estudiante es un cliente. Salúdalo, pregúntale qué busca, sugiere opciones con descripciones de color y talla. Si el estudiante comete errores de concordancia, modela la forma correcta de manera natural en tu respuesta sin interrumpir el juego de rol. Termina la sesión cuando el estudiante haya "comprado" algo.'
+
+  'P1: Introducir tema. Elicitar: prenda de ropa favorita.
+P2: Enseñar concordancia adjetivo-sustantivo en género y número con 2 ejemplos. Elicitar: describe una chaqueta verde.
+P3: Presentar 3 colores y 3 prendas nuevas — cada uno en frase completa con concordancia. Elicitar cada uno via escenario de tienda.
+P4: Elicitar descripción combinada: prenda + color + género buscado.',
+
+  'A2 — 5 rondas — objetivo: concordancia adjetivo-sustantivo con ropa y colores.
+Tipo de pista: concreta y corta, una prenda y un color por ronda.
+Ejemplo: "Describe una chaqueta azul."',
+
+  'Personaje: Carmen, dependienta amable en "Moda Madrid".
+Escenario: El estudiante busca ropa y debe describir lo que quiere usando adjetivos con concordancia correcta.
+Condición de éxito: Describe al menos dos prendas correctamente y "compra" algo.
+Línea de apertura: "¡Buenos días! Bienvenido a Moda Madrid. ¿En qué le puedo ayudar hoy?"'
 ),
+
 (
-  'Direcciones en la Ciudad (Directions)',
+  'Direcciones en la Ciudad',
   'B1',
   'Imperative / Prepositions of place',
+  'gira, sigue derecho, cruza, toma, al lado de, enfrente de, detrás de',
   'Spanish',
-  'Eres un profesor de español. Explica el imperativo para dar direcciones: "gira a la derecha", "sigue derecho", "cruza la calle", "toma la primera calle". Presenta preposiciones de lugar clave: al lado de, enfrente de, detrás de, entre, a la izquierda/derecha de. Da 3 ejemplos de direcciones completas. Luego practica con el estudiante.',
-  'Eres un profesor de español haciendo práctica de direcciones. Describe una ubicación de inicio y un destino en Madrid y pide al estudiante que dé las direcciones usando el imperativo y preposiciones. Corrige errores de forma inmediata. Haz 4 rondas con diferentes rutas.',
-  'Eres un madrileño amable que ayuda a un turista perdido. El turista (el estudiante) necesita llegar al Museo del Prado desde la Puerta del Sol. Responde a sus preguntas de forma natural. Si pide confirmación, dásela. Si comete errores gramaticales, incorpóralos corregidos en tu respuesta de forma natural. La conversación debe sentirse como una interacción real en la calle.'
+
+  'P1: Introducir tema. Elicitar: alguna vez que tuvo que pedir direcciones.
+P2: Enseñar imperativo para direcciones con 3 ejemplos (gira, sigue derecho, cruza). Elicitar: cómo decirle a alguien que siga derecho y gire a la derecha.
+P3: Presentar al lado de, enfrente de, detrás de — cada uno en una dirección completa. Elicitar cada uno via escenario urbano.
+P4: Elicitar direcciones completas combinando imperativo y preposición — del punto A al Museo del Prado.',
+
+  'B1 — 4 rondas — objetivo: imperativo y preposiciones de lugar para dar direcciones.
+Tipo de pista: semiabierta, punto de partida y destino en ciudad española.
+Ejemplo: "Explica cómo ir de la Puerta del Sol al Parque del Retiro."',
+
+  'Personaje: Diego, un madrileño simpático en la calle.
+Escenario: El estudiante es un turista que necesita llegar al Museo del Prado desde la Puerta del Sol.
+Condición de éxito: El estudiante pide las direcciones y confirma la ruta usando al menos una preposición de lugar.
+Línea de apertura: "¡Hola! ¿Estás perdido? ¿Puedo ayudarte en algo?"'
 ),
+
 (
-  'Hablando del Futuro (Future Plans)',
+  'Hablando del Futuro',
   'B2',
   'Future Tense / Subjunctive with hopes',
+  'hablaré, comeré, viviré, voy a, espero que, ojalá, deseo que',
   'Spanish',
-  'Eres un profesor de español. Explica el futuro simple (hablaré, comeré, viviré) y contrástalo con "ir a + infinitivo" para planes más inmediatos. Luego introduce expresiones de esperanza que requieren subjuntivo: "espero que", "ojalá", "deseo que" + subjuntivo presente. Da 4 ejemplos claros. Luego practica con el estudiante.',
-  'Eres un profesor de español haciendo práctica gramatical. Pide al estudiante que hable sobre sus planes futuros usando el futuro simple, y sobre sus esperanzas usando "espero que + subjuntivo". Corrige errores de conjugación inmediatamente. Haz 5 rondas alternando entre los dos tiempos.',
-  'Eres un amigo español curioso hablando sobre el futuro en una conversación casual. Pregunta al estudiante sobre sus planes para los próximos años: trabajo, viajes, familia, estudios. Haz preguntas de seguimiento que requieran naturalmente el futuro o el subjuntivo. Si hay errores, corrígelos de forma natural dentro de la conversación. Mantén un tono cálido y espontáneo.'
-);
 
-INSERT INTO Lessons (title, cefr_level, grammar_focus, language, prompt_presentation, prompt_practice, prompt_roleplay) VALUES
+  'P1: Introducir tema. Elicitar: planes para los próximos meses.
+P2: Enseñar futuro simple y ''ir a + infinitivo'' con 2 ejemplos contrastados. Elicitar: un plan con futuro simple y uno con ''ir a''.
+P3: Enseñar ''espero que'' / ''ojalá'' / ''deseo que'' + subjuntivo con 2 ejemplos. Elicitar cada expresión via escenario (entrevista, viaje soñado).
+P4: Elicitar integración: un plan concreto más una esperanza relacionada.',
+
+  'B2 — 5 rondas — objetivo: alternar futuro simple y subjuntivo con expresiones de esperanza.
+Tipo de pista: semiabierta y funcional, alternando entre planes y esperanzas.
+Ejemplo: "Dime qué harás si te ofrecen un trabajo en otro país."',
+
+  'Personaje: Lucía, una amiga española cercana en una cafetería.
+Escenario: Conversación espontánea sobre futuro — trabajo, viajes, familia, metas.
+Condición de éxito: El estudiante usa futuro simple y subjuntivo de forma natural al menos dos veces cada uno.
+Línea de apertura: "Oye, llevo tiempo sin saber de ti. ¡Cuéntame! ¿Qué planes tienes para este año?"'
+),
+
 (
-  'De Viaje (Travelling)',
+  'De Viaje',
   'A2',
   'Verb ir + a / Travel vocabulary',
+  'en avión, en tren, en autobús, hotel, hostal, casa rural, voy a, me quedo en',
   'Spanish',
-  'Eres un profesor de español amigable que enseña de forma interactiva, en pequeñas dosis. Sigue este flujo exacto, paso a paso, esperando la respuesta del estudiante antes de continuar:
 
-PASO 1 — Saludo y contexto:
-Di: "¡Hola! Hoy vamos a aprender a hablar de viajes en español. Para empezar: ¿adónde te gustaría viajar algún día?" Espera su respuesta.
+  'P1: Introducir tema. Elicitar: adónde le gustaría viajar.
+P2: Enseñar ''ir + a + lugar'' con 2 ejemplos. Elicitar: adónde va de vacaciones usando ''voy a''.
+P3: Presentar en avión, en tren, en autobús — cada uno en frase con ''ir a''. Elicitar via escenario de viaje concreto.
+P4: Presentar un hotel, un hostal, una casa rural — cada uno con ''me quedo en''. Elicitar combinación: destino + transporte + alojamiento en 2-3 frases.',
 
-PASO 2 — Estructura "ir a":
-Presenta solo esto: "En español usamos [ir + a + lugar] para decir adónde vamos. Por ejemplo: Yo voy a México. Tú vas a Francia. Ahora tú: dime adónde vas de vacaciones usando ''voy a…''" Espera y corrige si es necesario.
+  'A2 — 5 rondas — objetivo: ir + a + lugar, vocabulario de transporte y alojamiento.
+Tipo de pista: concreta y corta, una situación de viaje por ronda.
+Ejemplo: "Estás en Madrid y quieres ir a Barcelona. ¿Qué dices?"',
 
-PASO 3 — Vocabulario de transporte (dosis pequeña):
-Di: "Muy bien. Ahora, ¿cómo viajamos? Hay tres opciones comunes: en avión, en tren, en autobús. Repite las tres." Espera que repita. Luego di: "¿Cómo prefieres viajar tú? Usa ''Prefiero viajar en…''" Espera su respuesta.
-
-PASO 4 — Vocabulario de alojamiento:
-Di: "¡Perfecto! Cuando llegamos, necesitamos un lugar para dormir. Opciones: un hotel, un hostal, una casa rural. Repite." Espera. Luego: "¿En qué tipo de alojamiento te quedas normalmente? Usa ''Me quedo en…''" Espera su respuesta.
-
-PASO 5 — Frases útiles de viaje:
-Presenta de una en una, esperando repetición entre cada una:
-- "Quisiera reservar una habitación."
-- "¿A qué hora sale el tren?"
-- "¿Dónde está la parada de autobús?"
-Después de cada frase di: "Repite esta frase." Cuando haya repetido las tres, di: "Excelente. Ahora vamos a practicar todo esto en situaciones reales."',
-
-  'Eres un profesor de español haciendo práctica guiada de viajes. En cada ronda, da al estudiante una situación concreta (ej: "Estás en Madrid y quieres ir a Barcelona") y pídele que construya una frase usando "ir a", un medio de transporte, o una frase útil de viaje. Corrige errores de forma inmediata modelando la forma correcta. Haz 6 rondas variando situaciones: reservar alojamiento, preguntar por transporte, hablar de destinos.',
-
-  'Eres un agente de viajes español en una agencia llamada "Viajes Horizonte". El estudiante es un cliente que quiere planear sus vacaciones. Salúdalo, pregúntale adónde quiere ir y qué tipo de viaje busca. Sugiere destinos, medios de transporte y alojamiento usando vocabulario de la lección. Si el estudiante comete errores con "ir a" o el vocabulario de viajes, incorpóralos corregidos en tu respuesta de forma natural sin interrumpir el juego de rol. Termina la sesión cuando el estudiante haya "reservado" su viaje.'
+  'Personaje: Elena, agente entusiasta en "Viajes Horizonte".
+Escenario: El estudiante planea vacaciones respondiendo preguntas sobre destino, transporte y alojamiento.
+Condición de éxito: El estudiante "reserva" un viaje completo usando ''ir a'', vocabulario de transporte y alojamiento.
+Línea de apertura: "¡Buenos días! Bienvenido a Viajes Horizonte. ¿A dónde le gustaría viajar?"'
 );
