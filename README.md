@@ -72,5 +72,30 @@ pnpm run dev
 
 Navigate to `http://localhost:5173`. Click "Start Practice", grant microphone/camera permissions, and start learning!
 
-## Infrastructure (Bonus)
-The `terraform/` directory contains the IaC definitions for deploying the Cloud Run service and Cloud SQL instances. All secrets are managed via Google Secret Manager.
+## Production Deployment
+
+### Option 1: Google Cloud Run (Fully Managed)
+The `terraform/` directory contains IaC definitions for deploying to Cloud Run and Cloud SQL. All secrets are managed via Google Secret Manager.
+
+```bash
+cd terraform
+terraform init
+terraform apply
+```
+
+### Option 2: Oracle Ampere + Google Cloud SQL (Recommended)
+For better performance and cost savings, deploy backend/agent on Oracle Cloud while keeping the database on Google Cloud SQL.
+
+**One-command setup:**
+```bash
+curl -sSL https://raw.githubusercontent.com/YOUR_USERNAME/ai-tutor-hackaton/main/deploy-oracle.sh | sudo bash
+```
+
+See [DEPLOYMENT_ORACLE.md](./DEPLOYMENT_ORACLE.md) for detailed instructions.
+
+**Why Oracle Ampere?**
+- ✅ Free tier: 4 ARM cores + 24GB RAM forever
+- ✅ No timeout issues with long-running agents
+- ✅ Better real-time performance
+- ✅ Still uses Google Cloud SQL (hackathon compliant)
+- ✅ Automated deployment script (bonus points!)

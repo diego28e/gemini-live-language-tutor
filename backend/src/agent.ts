@@ -7,18 +7,48 @@ import { VideoStream, VideoBufferType, TrackKind } from '@livekit/rtc-node';
 import type { Track } from '@livekit/rtc-node';
 import sharp from 'sharp';
 import { runEvaluation } from './evaluator.js';
+import http from 'node:http';
 
 dotenv.config();
+
+// ─── Cloud Run health check server ───────────────────────────────────────────
+// Cloud Run requires every Service container to bind to PORT=8080.
+// LiveKit spawns worker child processes that will also parse this file.
+// We catch EADDRINUSE so only the supervisor binds the port successfully,
+// and the child processes safely ignore the port collision.
+const healthPort = Number(process.env.PORT ?? 8080);
+const server = http.createServer((_, res) => {
+    res.writeHead(200, { 'Content-Type': 'text/plain' });
+    res.end('ok');
+});
+server.on('error', (err: any) => {
+    if (err.code === 'EADDRINUSE') {
+        console.log(`[agent] Port ${healthPort} in use. Safely ignoring in child worker.`);
+    } else {
+        console.error(`[agent] Health check server error:`, err);
+    }
+});
+server.listen(healthPort, () => {
+    console.log(`[agent] Health check server listening on port ${healthPort}`);
+});
+// ─────────────────────────────────────────────────────────────────────────────
 
 const SESSION_LIMIT_MS = 5 * 60 * 1000; // 5 minutes hard stop
 
 export default defineAgent({
     entry: async (ctx: JobContext) => {
-        console.log(`[agent] Starting for room: ${ctx.room?.name || 'unknown'}`);
-        await ctx.connect();
+        // Extract room name securely from the matched job, before WebRTC resolves
+        const roomName = ctx.job?.room?.name || ctx.room?.name || 'unknown';
+        console.log(`[agent] Starting for room: ${roomName}`);
 
-        const roomName = ctx.room?.name || 'unknown';
-        console.log(`[agent] Connected to ${roomName}`);
+        try {
+            console.log(`[agent] Attempting WebRTC connection...`);
+            await ctx.connect();
+            console.log(`[agent] Connected securely to ${roomName}`);
+        } catch (connErr) {
+            console.error(`[agent] WebRTC ctx.connect() failed or timed out!`, connErr);
+            return;
+        }
 
         let systemPrompt = "You are a helpful language tutor. Keep your answers concise.";
         let agentVoice = "Aoede";
@@ -39,12 +69,14 @@ export default defineAgent({
             try {
                 if (process.env.DATABASE_URL) {
                     console.log(`[agent] Fetching instructions for lesson ID: ${dbLessonId}`);
-                    const result = await pool.query(
-                        `SELECT title, grammar_focus, vocab_focus, cefr_level, language,
+                    const queryText = `SELECT title, grammar_focus, vocab_focus, cefr_level, language,
                                 moment_1_presentation, moment_2_practice, moment_3_conversation
-                         FROM Lessons WHERE id = $1`,
-                        [dbLessonId]
-                    );
+                         FROM Lessons WHERE id = $1`;
+                    console.log(`[agent] Executing DB query with ID: ${dbLessonId}`);
+                    
+                    const result = await pool.query(queryText, [dbLessonId]);
+                    console.log(`[agent] Query executed successfully. Rows returned: ${result.rows.length}`);
+                    
                     if (result.rows.length > 0) {
                         const {
                             title,
@@ -58,7 +90,7 @@ export default defineAgent({
                         } = result.rows[0];
 
                         lessonContext = { language, grammar_focus, vocab_focus, cefr_level };
-                        console.log(`[agent] Loaded lesson: ${title} (${language})`);
+                        console.log(`[agent] Loaded lesson successfully: ${title} (${language})`);
 
                         systemPrompt = `You are an expert ${language} tutor running a 5-minute lesson called "${title}" at CEFR level ${cefr_level}. This is a voice session — speak naturally at all times.
 
@@ -88,11 +120,18 @@ Correction in Moment 3: Never interrupt the flow to correct. Instead, recast —
 Tone: Warm, encouraging, and concise. Never lecture. One sentence of feedback maximum.
 
 Pacing: When Moment 3 feels complete, deliver a short spoken debrief — one thing they did well, one correction with the correct form, and one vocabulary or fluency tip. If Moment 3 was a roleplay, step out of character before the debrief.`;
+                        console.log(`[agent] System prompt successfully generated for lesson.`);
+                    } else {
+                        console.warn(`[agent] DB returned 0 rows for lesson ID: ${dbLessonId}. Using fallback prompt.`);
                     }
+                } else {
+                    console.warn(`[agent] DATABASE_URL is not set. Cannot fetch lesson instructions.`);
                 }
             } catch (e) {
-                console.error("DB Error in Agent:", e);
+                console.error(`[agent] CRITICAL DB Error retrieving lesson details for ${dbLessonId}:`, e);
             }
+        } else {
+            console.log(`[agent] Room name format unrecognized or doesn't match 'l-{UUID}', using generic fallback prompt.`);
         }
 
         try {
@@ -112,12 +151,15 @@ Pacing: When Moment 3 feels complete, deliver a short spoken debrief — one thi
             });
 
             const session = new voice.AgentSession({ llm: realtimeModel });
-            await session.start({ agent, room: ctx.room! });
-            session.generateReply();
-
-            console.log("[agent] Agent started successfully.");
-
-            // ── Transcript accumulation ────────────────────────────────────────────
+            try {
+                console.log("[agent] Starting voice AgentSession...");
+                await session.start({ agent, room: ctx.room! });
+                session.generateReply();
+                console.log("[agent] AgentSession started and generateReply triggered successfully.");
+            } catch (sessionErr) {
+                console.error("[agent] Session start failed! Did Gemini reject the connection?", sessionErr);
+                return;
+            }
             // Key: segmentId (one per agent turn). Updated on EVERY word chunk so
             // that if the stream is aborted (hard-stop), we already have the text
             // accumulated up to that point — no data loss on abrupt closes.

@@ -27,3 +27,25 @@ Thumbs.db
 .cache/
 dist/
 build/
+*.tfvars
+!*.tfvars.example
+
+# Terraform state and local data
+terraform/.terraform/
+terraform/.terraform.lock.hcl
+terraform/terraform.tfstate
+terraform/terraform.tfstate.backup
+
+# Debug/scratch logs
+*.log
+*.stackdump
+vm_*.log
+.agent_*.log
+
+# Junk files from troubleshooting
+console.log*
+process.stdout*
+bash.exe.stackdump
+cloud-sql-proxy*
+{,
+{}
