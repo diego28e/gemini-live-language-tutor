@@ -130,6 +130,7 @@ export default function Classroom() {
     const [nativeLanguage, setNativeLanguage] = useState<string>('');
     const [lessonLanguage, setLessonLanguage] = useState<string>('');
     const [sessionId, setSessionId] = useState<string | null>(null);
+    const [lessonTitle, setLessonTitle] = useState<string>('');
 
     useEffect(() => {
         if (!auth.currentUser) {
@@ -175,8 +176,11 @@ export default function Classroom() {
                 });
                 if (lessonsRes.ok) {
                     const lessons = await lessonsRes.json();
-                    const lesson = lessons.find((l: { id: string; language: string }) => l.id === lessonId);
-                    if (lesson) setLessonLanguage(lesson.language ?? '');
+                    const lesson = lessons.find((l: { id: string; language: string; title: string }) => l.id === lessonId);
+                    if (lesson) {
+                        setLessonLanguage(lesson.language ?? '');
+                        setLessonTitle(lesson.title ?? '');
+                    }
                 }
             } catch (err: any) {
                 // AbortError is expected on StrictMode unmount — not a real error
@@ -231,6 +235,7 @@ export default function Classroom() {
                     sessionId={sessionId}
                     nativeLanguage={nativeLanguage}
                     lessonLanguage={lessonLanguage}
+                    lessonTitle={lessonTitle}
                 />
                 <RoomAudioRenderer />
                 <StartAudio label="Click to allow audio playback" />
@@ -248,6 +253,7 @@ interface ActiveClassroomProps {
     sessionId: string | null;
     nativeLanguage: string;
     lessonLanguage: string;
+    lessonTitle: string;
 }
 
 interface TooltipState {
@@ -259,7 +265,7 @@ interface TooltipState {
     position: { x: number; y: number };
 }
 
-function ActiveClassroom({ sessionId, nativeLanguage, lessonLanguage }: ActiveClassroomProps) {
+function ActiveClassroom({ sessionId, nativeLanguage, lessonLanguage, lessonTitle }: ActiveClassroomProps) {
     const navigate = useNavigate();
     const room = useRoomContext();
     const { state: agentState, audioTrack: agentAudio } = useVoiceAssistant();
@@ -354,10 +360,19 @@ function ActiveClassroom({ sessionId, nativeLanguage, lessonLanguage }: ActiveCl
     const allTranscriptions = transcriptions.filter(t => (t.text ?? '').trim());
     const captionLines = allTranscriptions.slice(-3);
 
+    const hasAutoExited = useRef(false);
+
     useEffect(() => {
         const interval = setInterval(() => setSecondsLeft(s => Math.max(0, s - 1)), 1000);
         return () => clearInterval(interval);
     }, []);
+
+    useEffect(() => {
+        if (secondsLeft === 0 && !hasAutoExited.current) {
+            hasAutoExited.current = true;
+            void submitAndNavigate();
+        }
+    }, [secondsLeft]);
 
     const minutes = String(Math.floor(secondsLeft / 60)).padStart(2, '0');
     const seconds = String(secondsLeft % 60).padStart(2, '0');
@@ -443,12 +458,19 @@ function ActiveClassroom({ sessionId, nativeLanguage, lessonLanguage }: ActiveCl
                 />
             )}
 
-            {/* Countdown Timer */}
-            <div className={`absolute top-16 right-6 px-4 py-2 rounded-full text-sm font-mono font-bold border backdrop-blur-md ${timerUrgent
-                ? 'bg-red-500/20 border-red-500/40 text-red-400'
-                : 'bg-white/5 border-white/10 text-slate-300'
-                }`}>
-                {minutes}:{seconds}
+            {/* Lesson title + Countdown Timer */}
+            <div className="absolute top-4 right-6 flex flex-col items-end gap-1.5">
+                {lessonTitle && (
+                    <p className="text-xs font-medium text-slate-400 tracking-wide truncate max-w-[200px]">
+                        {lessonTitle}
+                    </p>
+                )}
+                <div className={`px-4 py-2 rounded-full text-sm font-mono font-bold border backdrop-blur-md ${timerUrgent
+                    ? 'bg-red-500/20 border-red-500/40 text-red-400'
+                    : 'bg-white/5 border-white/10 text-slate-300'
+                    }`}>
+                    {minutes}:{seconds}
+                </div>
             </div>
 
             {/* Main Agent Visualization */}
