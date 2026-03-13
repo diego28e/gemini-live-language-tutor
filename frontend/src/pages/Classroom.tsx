@@ -397,7 +397,7 @@ function ActiveClassroom({ sessionId, nativeLanguage, lessonLanguage, lessonTitl
     const captionLines = allTranscriptions.slice(-3);
 
     const hasAutoExited = useRef(false);
-    const agentReady = agentState !== 'connecting';
+    const agentReady = agentState === 'listening' || agentState === 'speaking' || agentState === 'thinking';
 
     // Start timer only once the agent is truly connected
     useEffect(() => {
