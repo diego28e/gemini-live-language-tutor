@@ -16,6 +16,41 @@ import {
 import { Track, ConnectionState, RoomEvent, type TranscriptionSegment } from 'livekit-client';
 import { auth } from '../firebase';
 import { ArrowLeft, Loader2, Languages, X } from 'lucide-react';
+
+// ---------------------------------------------------------------------------
+// Connecting loader — concentric animated rings, no styled-components
+// ---------------------------------------------------------------------------
+function ConnectingLoader() {
+    const rings = [
+        { r: 60,   stroke: 'hsl(3,90%,55%)',  sw: 8, da: '377 377',       delay: '0s',     anim: 'ring1' },
+        { r: 52.5, stroke: 'hsl(13,90%,55%)', sw: 7, da: '329.9 329.9',   delay: '0.04s',  anim: 'ring2' },
+        { r: 46,   stroke: 'hsl(23,90%,55%)', sw: 6, da: '289 289',       delay: '0.08s',  anim: 'ring3' },
+        { r: 40.5, stroke: 'hsl(33,90%,55%)', sw: 5, da: '254.5 254.5',   delay: '0.12s',  anim: 'ring4' },
+        { r: 36,   stroke: 'hsl(43,90%,55%)', sw: 4, da: '226.2 226.2',   delay: '0.16s',  anim: 'ring5' },
+        { r: 32.5, stroke: 'hsl(53,90%,55%)', sw: 3, da: '204.2 204.2',   delay: '0.2s',   anim: 'ring6' },
+    ];
+    return (
+        <svg width="128" height="128" viewBox="0 0 128 128" xmlns="http://www.w3.org/2000/svg">
+            {rings.map(({ r, stroke, sw, da, delay, anim }) => (
+                <circle
+                    key={anim}
+                    cx={64} cy={64} r={r}
+                    fill="none"
+                    stroke={stroke}
+                    strokeWidth={sw}
+                    transform="rotate(-90,64,64)"
+                    strokeLinecap="round"
+                    strokeDasharray={da}
+                    style={{
+                        transformBox: 'fill-box',
+                        transformOrigin: '50% 50%',
+                        animation: `${anim} 4s ${delay} ease-in-out infinite`,
+                    }}
+                />
+            ))}
+        </svg>
+    );
+}
 import Lottie from 'lottie-react';
 
 // ---------------------------------------------------------------------------
@@ -272,6 +307,7 @@ function ActiveClassroom({ sessionId, nativeLanguage, lessonLanguage, lessonTitl
     const transcriptions = useTranscriptions();
     const connectionState = useConnectionState();
     const [secondsLeft, setSecondsLeft] = useState(SESSION_SECONDS);
+    const [timerStarted, setTimerStarted] = useState(false);
     const cameraTracks = useTracks([Track.Source.Camera], { onlySubscribed: false });
     const localCameraTrack = cameraTracks.find(t => t.participant.isLocal && !t.publication.isMuted);
     const captionRef = useRef<HTMLDivElement>(null);
@@ -361,11 +397,18 @@ function ActiveClassroom({ sessionId, nativeLanguage, lessonLanguage, lessonTitl
     const captionLines = allTranscriptions.slice(-3);
 
     const hasAutoExited = useRef(false);
+    const agentReady = agentState !== 'connecting';
+
+    // Start timer only once the agent is truly connected
+    useEffect(() => {
+        if (agentReady && !timerStarted) setTimerStarted(true);
+    }, [agentReady]);
 
     useEffect(() => {
+        if (!timerStarted) return;
         const interval = setInterval(() => setSecondsLeft(s => Math.max(0, s - 1)), 1000);
         return () => clearInterval(interval);
-    }, []);
+    }, [timerStarted]);
 
     useEffect(() => {
         if (secondsLeft === 0 && !hasAutoExited.current) {
@@ -475,25 +518,37 @@ function ActiveClassroom({ sessionId, nativeLanguage, lessonLanguage, lessonTitl
 
             {/* Main Agent Visualization */}
             <div className="relative mb-8 flex flex-col items-center">
-                <div className={`w-48 h-48 rounded-full border border-white/10 bg-gradient-to-br transition-colors duration-1000 flex items-center justify-center relative shadow-2xl ${isAgentSpeaking ? 'from-indigo-500/40 to-purple-500/10 shadow-indigo-500/20' :
+                <div className={`w-48 h-48 rounded-full border border-white/10 bg-gradient-to-br transition-colors duration-1000 flex items-center justify-center relative shadow-2xl ${
+                    !agentReady ? 'from-slate-800 to-slate-900 shadow-none' :
+                    isAgentSpeaking ? 'from-indigo-500/40 to-purple-500/10 shadow-indigo-500/20' :
                     isAgentListening ? 'from-emerald-500/40 to-teal-500/10 shadow-emerald-500/20' :
-                        'from-slate-800 to-slate-900 shadow-none'
-                    }`}>
-                    {agentAudio && (
-                        <BarVisualizer
-                            trackRef={agentAudio}
-                            barCount={5}
-                            options={{ minHeight: 10 }}
-                            className="w-24 h-24 text-white opacity-80"
-                        />
-                    )}
-                    {isAgentSpeaking && (
-                        <div className="absolute inset-0 rounded-full border-2 border-indigo-400 opacity-50 animate-ping" />
+                    'from-slate-800 to-slate-900 shadow-none'
+                }`}>
+                    {!agentReady ? (
+                        <ConnectingLoader />
+                    ) : (
+                        <>
+                            {agentAudio && (
+                                <BarVisualizer
+                                    trackRef={agentAudio}
+                                    barCount={5}
+                                    options={{ minHeight: 10 }}
+                                    className="w-24 h-24 text-white opacity-80"
+                                />
+                            )}
+                            {isAgentSpeaking && (
+                                <div className="absolute inset-0 rounded-full border-2 border-indigo-400 opacity-50 animate-ping" />
+                            )}
+                        </>
                     )}
                 </div>
                 <div className="mt-6 text-center">
-                    <h2 className="text-2xl font-semibold mb-1">Tutor ({agentState})</h2>
-                    <p className="text-slate-400 text-sm">Speak naturally. Interrupt whenever you want.</p>
+                    <h2 className="text-2xl font-semibold mb-1">
+                        {agentReady ? `Tutor (${agentState})` : 'Connecting…'}
+                    </h2>
+                    <p className="text-slate-400 text-sm">
+                        {agentReady ? 'Speak naturally. Interrupt whenever you want.' : 'Your AI tutor is joining the session…'}
+                    </p>
                 </div>
             </div>
 
