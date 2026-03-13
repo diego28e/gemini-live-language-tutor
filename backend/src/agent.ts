@@ -41,15 +41,6 @@ export default defineAgent({
         const roomName = ctx.job?.room?.name || ctx.room?.name || 'unknown';
         console.log(`[agent] Starting for room: ${roomName}`);
 
-        try {
-            console.log(`[agent] Attempting WebRTC connection...`);
-            await ctx.connect();
-            console.log(`[agent] Connected securely to ${roomName}`);
-        } catch (connErr) {
-            console.error(`[agent] WebRTC ctx.connect() failed or timed out!`, connErr);
-            return;
-        }
-
         let systemPrompt = "You are a helpful language tutor. Keep your answers concise.";
         let agentVoice = "Aoede";
 
@@ -61,37 +52,26 @@ export default defineAgent({
             cefr_level: string;
         } | null = null;
 
+        // Parse lesson ID from room name immediately so DB + WebRTC connect can run in parallel
         const parts = roomName.split('-');
-        // Room name format: l-{UUID} → split produces 6 parts (l + 5 UUID segments)
         console.log(`[agent] Room name: ${roomName} → ${parts.length} parts; parsing lesson ID...`);
-        if (parts.length >= 6 && parts[0] === 'l') {
-            const dbLessonId = `${parts[1]}-${parts[2]}-${parts[3]}-${parts[4]}-${parts[5]}`;
-            try {
-                if (process.env.DATABASE_URL) {
-                    console.log(`[agent] Fetching instructions for lesson ID: ${dbLessonId}`);
-                    const queryText = `SELECT title, grammar_focus, vocab_focus, cefr_level, language,
+
+        const lessonFetchPromise: Promise<void> = (async () => {
+            if (parts.length >= 6 && parts[0] === 'l' && process.env.DATABASE_URL) {
+                const dbLessonId = `${parts[1]}-${parts[2]}-${parts[3]}-${parts[4]}-${parts[5]}`;
+                try {
+                    console.log(`[agent] Fetching lesson: ${dbLessonId}`);
+                    const result = await pool.query(
+                        `SELECT title, grammar_focus, vocab_focus, cefr_level, language,
                                 moment_1_presentation, moment_2_practice, moment_3_conversation
-                         FROM Lessons WHERE id = $1`;
-                    console.log(`[agent] Executing DB query with ID: ${dbLessonId}`);
-                    
-                    const result = await pool.query(queryText, [dbLessonId]);
-                    console.log(`[agent] Query executed successfully. Rows returned: ${result.rows.length}`);
-                    
+                         FROM Lessons WHERE id = $1`,
+                        [dbLessonId]
+                    );
                     if (result.rows.length > 0) {
-                        const {
-                            title,
-                            grammar_focus,
-                            vocab_focus,
-                            cefr_level,
-                            language,
-                            moment_1_presentation,
-                            moment_2_practice,
-                            moment_3_conversation,
-                        } = result.rows[0];
-
+                        const { title, grammar_focus, vocab_focus, cefr_level, language,
+                            moment_1_presentation, moment_2_practice, moment_3_conversation } = result.rows[0];
                         lessonContext = { language, grammar_focus, vocab_focus, cefr_level };
-                        console.log(`[agent] Loaded lesson successfully: ${title} (${language})`);
-
+                        console.log(`[agent] Loaded lesson: ${title} (${language})`);
                         systemPrompt = `You are an expert ${language} tutor running a 5-minute lesson called "${title}" at CEFR level ${cefr_level}. This is a voice session — speak naturally at all times.
 
 The lesson has three moments. Move through them in order without announcing transitions.
@@ -120,34 +100,50 @@ Correction in Moment 3: Never interrupt the flow to correct. Instead, recast —
 Tone: Warm, encouraging, and concise. Never lecture. One sentence of feedback maximum.
 
 Pacing: When Moment 3 feels complete, deliver a short spoken debrief — one thing they did well, one correction with the correct form, and one vocabulary or fluency tip. If Moment 3 was a roleplay, step out of character before the debrief.`;
-                        console.log(`[agent] System prompt successfully generated for lesson.`);
                     } else {
                         console.warn(`[agent] DB returned 0 rows for lesson ID: ${dbLessonId}. Using fallback prompt.`);
                     }
-                } else {
-                    console.warn(`[agent] DATABASE_URL is not set. Cannot fetch lesson instructions.`);
+                } catch (e) {
+                    console.error(`[agent] DB Error for ${dbLessonId}:`, e);
                 }
-            } catch (e) {
-                console.error(`[agent] CRITICAL DB Error retrieving lesson details for ${dbLessonId}:`, e);
+            } else {
+                console.log(`[agent] Room name unrecognized or DATABASE_URL not set — using fallback prompt.`);
             }
-        } else {
-            console.log(`[agent] Room name format unrecognized or doesn't match 'l-{UUID}', using generic fallback prompt.`);
-        }
+        })();
+
+        // Run WebRTC connect, DB fetch, AND Gemini model init all in parallel
+        // RealtimeModel construction kicks off the Gemini WebSocket handshake immediately
+        const realtimeModel = new google.beta.realtime.RealtimeModel({
+            model: 'gemini-2.5-flash-native-audio-preview-09-2025',
+            voice: agentVoice,
+            outputAudioTranscription: {},
+            inputAudioTranscription: {},
+            // instructions will be set after lessonFetchPromise resolves below
+        });
 
         try {
-            const realtimeModel = new google.beta.realtime.RealtimeModel({
-                model: 'gemini-2.5-flash-native-audio-preview-09-2025',
-                instructions: systemPrompt,
-                voice: agentVoice,
-                // Enable Gemini's own output transcription so we can forward it word-by-word
-                outputAudioTranscription: {},
-                // Enable input transcription for student speech in transcript
-                inputAudioTranscription: {},
-            });
+            console.log(`[agent] Connecting to room, fetching lesson, and warming Gemini in parallel...`);
+            const [connResult] = await Promise.allSettled([
+                ctx.connect(),
+                lessonFetchPromise,
+            ]);
+            if (connResult.status === 'rejected') {
+                console.error(`[agent] WebRTC ctx.connect() failed!`, connResult.reason);
+                return;
+            }
+            console.log(`[agent] Connected to ${roomName}, lesson data ready.`);
+        } catch (connErr) {
+            console.error(`[agent] Unexpected connect error`, connErr);
+            return;
+        }
 
+        // Now systemPrompt is fully resolved — apply it to the model
+        realtimeModel.instructions = systemPrompt;
+
+        try {
             const agent = new voice.Agent({
                 instructions: systemPrompt,
-                llm: realtimeModel
+                llm: realtimeModel,
             });
 
             const session = new voice.AgentSession({ llm: realtimeModel });
@@ -155,9 +151,9 @@ Pacing: When Moment 3 feels complete, deliver a short spoken debrief — one thi
                 console.log("[agent] Starting voice AgentSession...");
                 await session.start({ agent, room: ctx.room! });
                 session.generateReply();
-                console.log("[agent] AgentSession started and generateReply triggered successfully.");
+                console.log("[agent] AgentSession started and generateReply triggered.");
             } catch (sessionErr) {
-                console.error("[agent] Session start failed! Did Gemini reject the connection?", sessionErr);
+                console.error("[agent] Session start failed!", sessionErr);
                 return;
             }
             // Key: segmentId (one per agent turn). Updated on EVERY word chunk so
