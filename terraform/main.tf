@@ -8,6 +8,10 @@ terraform {
       source  = "hashicorp/random"
       version = "~> 3.0"
     }
+    time = {
+      source  = "hashicorp/time"
+      version = "~> 0.9"
+    }
   }
 }
 
@@ -55,10 +59,22 @@ resource "google_project_service" "firebase" {
 
 # ─── VPC & Private Networking (For Cloud SQL -> VM) ───────────────────────────
 
+# GCP's Service Networking API takes 60-90s to fully propagate after being
+# enabled in a brand-new project. Without this wait, the peering connection
+# fails with a 403 even though the API resource shows as created in Terraform.
+resource "time_sleep" "wait_for_apis" {
+  create_duration = "90s"
+  depends_on = [
+    google_project_service.compute,
+    google_project_service.servicenetworking,
+    google_project_service.sql,
+  ]
+}
+
 resource "google_compute_network" "main" {
   name                    = "ai-tutor-vpc"
   auto_create_subnetworks = true
-  depends_on              = [google_project_service.compute]
+  depends_on              = [time_sleep.wait_for_apis]
 }
 
 resource "google_compute_global_address" "private_ip_alloc" {
@@ -73,7 +89,7 @@ resource "google_service_networking_connection" "private_vpc_connection" {
   network                 = google_compute_network.main.id
   service                 = "servicenetworking.googleapis.com"
   reserved_peering_ranges = [google_compute_global_address.private_ip_alloc.name]
-  depends_on              = [google_project_service.servicenetworking]
+  depends_on              = [time_sleep.wait_for_apis]
 }
 
 # ─── Artifact Registry ────────────────────────────────────────────────────────
@@ -143,7 +159,10 @@ resource "random_id" "db_suffix" {
 }
 
 resource "google_sql_database_instance" "main" {
-  depends_on       = [google_service_networking_connection.private_vpc_connection]
+  depends_on = [
+    google_service_networking_connection.private_vpc_connection,
+    google_project_service.sql,
+  ]
   name             = "ai-tutor-db-${random_id.db_suffix.hex}"
   database_version = "POSTGRES_15"
   region           = var.region
@@ -407,7 +426,10 @@ data "google_compute_zones" "available" {
 }
 
 resource "google_compute_instance" "agent_vm" {
-  depends_on   = [google_project_service.compute, google_sql_database_instance.main]
+  depends_on = [
+    google_compute_network.main,
+    google_sql_database_instance.main,
+  ]
   name         = "ai-tutor-vm"
   machine_type = "e2-medium"
   zone         = data.google_compute_zones.available.names[0]
