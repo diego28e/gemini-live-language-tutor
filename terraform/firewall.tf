@@ -8,4 +8,6 @@ resource "google_compute_firewall" "allow_ssh" {
   }
 
   source_ranges = ["0.0.0.0/0"]
+
+  depends_on = [google_compute_network.main]
 }
