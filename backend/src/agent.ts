@@ -111,18 +111,8 @@ Pacing: When Moment 3 feels complete, deliver a short spoken debrief — one thi
             }
         })();
 
-        // Run WebRTC connect, DB fetch, AND Gemini model init all in parallel
-        // RealtimeModel construction kicks off the Gemini WebSocket handshake immediately
-        const realtimeModel = new google.beta.realtime.RealtimeModel({
-            model: 'gemini-2.5-flash-native-audio-preview-09-2025',
-            voice: agentVoice,
-            outputAudioTranscription: {},
-            inputAudioTranscription: {},
-            // instructions will be set after lessonFetchPromise resolves below
-        });
-
         try {
-            console.log(`[agent] Connecting to room, fetching lesson, and warming Gemini in parallel...`);
+            console.log(`[agent] Connecting to room and fetching lesson in parallel...`);
             const [connResult] = await Promise.allSettled([
                 ctx.connect(),
                 lessonFetchPromise,
@@ -137,8 +127,14 @@ Pacing: When Moment 3 feels complete, deliver a short spoken debrief — one thi
             return;
         }
 
-        // Now systemPrompt is fully resolved — apply it to the model
-        realtimeModel.instructions = systemPrompt;
+        // systemPrompt is fully resolved — construct model with final instructions
+        const realtimeModel = new google.beta.realtime.RealtimeModel({
+            model: 'gemini-2.5-flash-native-audio-preview-09-2025',
+            voice: agentVoice,
+            outputAudioTranscription: {},
+            inputAudioTranscription: {},
+            instructions: systemPrompt,
+        });
 
         try {
             const agent = new voice.Agent({
