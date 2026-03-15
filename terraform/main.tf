@@ -452,23 +452,24 @@ resource "google_compute_instance" "agent_vm" {
       exec >> /var/log/agent-startup.log 2>&1
       echo "=== Agent startup: $(date) ==="
 
-      # Install Docker and gcloud SDK
-      apt-get update -qq
-      apt-get install -y -qq apt-transport-https ca-certificates curl gnupg
+      # Install Docker and gcloud SDK (skipped on reboot if already present)
+      if ! command -v docker &>/dev/null; then
+        apt-get update -qq
+        apt-get install -y -qq apt-transport-https ca-certificates curl gnupg
 
-      # Docker
-      install -m 0755 -d /etc/apt/keyrings
-      curl -fsSL https://download.docker.com/linux/debian/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
-      echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/debian $(. /etc/os-release && echo $VERSION_CODENAME) stable" > /etc/apt/sources.list.d/docker.list
+        install -m 0755 -d /etc/apt/keyrings
+        curl -fsSL https://download.docker.com/linux/debian/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+        echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/debian $(. /etc/os-release && echo $VERSION_CODENAME) stable" > /etc/apt/sources.list.d/docker.list
 
-      # gcloud SDK
-      curl -fsSL https://packages.cloud.google.com/apt/doc/apt-key.gpg | gpg --dearmor -o /etc/apt/keyrings/cloud.google.gpg
-      echo "deb [signed-by=/etc/apt/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" > /etc/apt/sources.list.d/google-cloud-sdk.list
+        curl -fsSL https://packages.cloud.google.com/apt/doc/apt-key.gpg | gpg --dearmor -o /etc/apt/keyrings/cloud.google.gpg
+        echo "deb [signed-by=/etc/apt/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" > /etc/apt/sources.list.d/google-cloud-sdk.list
 
-      apt-get update -qq
-      apt-get install -y -qq docker-ce docker-ce-cli containerd.io google-cloud-cli
+        apt-get update -qq
+        apt-get install -y -qq docker-ce docker-ce-cli containerd.io google-cloud-cli
 
-      systemctl enable docker
+        systemctl enable docker
+      fi
+
       systemctl start docker
 
       echo "Authenticating Docker to Artifact Registry..."
@@ -484,19 +485,18 @@ resource "google_compute_instance" "agent_vm" {
       AZURE_REGION_VAL=$(gcloud secrets versions access latest --secret=azure-translate-region --project=${var.project_id} 2>/dev/null || echo mock)
       AZURE_KEY_VAL=$(gcloud secrets versions access latest --secret=azure-translate-key --project=${var.project_id} 2>/dev/null || echo mock)
 
-      printf '%s
-' \
-        "NODE_ENV=production" \
-        "GOOGLE_CLOUD_PROJECT=${var.project_id}" \
-        "DATABASE_URL=${local.db_private_url}" \
-        "LIVEKIT_URL=$LIVEKIT_URL_VAL" \
-        "LIVEKIT_API_KEY=$LIVEKIT_API_KEY_VAL" \
-        "LIVEKIT_API_SECRET=$LIVEKIT_API_SECRET_VAL" \
-        "GEMINI_API_KEY=$GEMINI_API_KEY_VAL" \
-        "AZURE_TRANSLATE_ENDPOINT=$AZURE_ENDPOINT_VAL" \
-        "AZURE_TRANSLATE_REGION=$AZURE_REGION_VAL" \
-        "AZURE_TRANSLATE_KEY=$AZURE_KEY_VAL" \
-        > /etc/agent.env
+      cat > /etc/agent.env <<EOF
+NODE_ENV=production
+GOOGLE_CLOUD_PROJECT=${var.project_id}
+DATABASE_URL=${local.db_private_url}
+LIVEKIT_URL=$LIVEKIT_URL_VAL
+LIVEKIT_API_KEY=$LIVEKIT_API_KEY_VAL
+LIVEKIT_API_SECRET=$LIVEKIT_API_SECRET_VAL
+GEMINI_API_KEY=$GEMINI_API_KEY_VAL
+AZURE_TRANSLATE_ENDPOINT=$AZURE_ENDPOINT_VAL
+AZURE_TRANSLATE_REGION=$AZURE_REGION_VAL
+AZURE_TRANSLATE_KEY=$AZURE_KEY_VAL
+EOF
       chmod 600 /etc/agent.env
 
       echo "Pulling agent image..."
