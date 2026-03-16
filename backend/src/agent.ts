@@ -63,7 +63,7 @@ export default defineAgent({
 
         // Parse lesson ID from room name immediately so DB + WebRTC connect can run in parallel
         const parts = roomName.split('-');
-        log(`[agent] Room name: ${roomName} → ${parts.length} parts; parsing lesson ID...`);
+        log(`[agent] roomName="${roomName}" parts=${JSON.stringify(parts)} parts[0]="${parts[0]}" DATABASE_URL=${!!process.env.DATABASE_URL}`);
 
         const lessonFetchPromise: Promise<void> = (async () => {
             // Check if it starts with 'l-' followed by at least one part
@@ -159,7 +159,7 @@ Pacing: When Moment 3 feels complete, deliver a short spoken debrief — one thi
             try {
                 log(`[agent] Starting voice AgentSession...`);
                 await session.start({ agent, room: ctx.room! });
-                session.generateReply();
+                session.generateReply({ instructions: systemPrompt });
                 log(`[agent] AgentSession started and generateReply triggered.`);
             } catch (sessionErr) {
                 log(`[agent] Session start failed: ${sessionErr}`);
