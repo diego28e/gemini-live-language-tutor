@@ -46,7 +46,7 @@ Make sure the following tools are installed and available in your terminal befor
 
 ### Step 1 — Start the Local Database
 
-The project ships with a `docker-compose.yml` that spins up a PostgreSQL 15 container on port **5435** and automatically applies `database/schema.sql` on first boot (including all seed lessons).
+The project ships with a `docker-compose.yml` that spins up a PostgreSQL 18 container on port **5435** and automatically applies `database/schema.sql` on first boot (including all seed lessons).
 
 From the project root:
 
