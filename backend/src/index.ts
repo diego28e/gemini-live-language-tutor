@@ -23,7 +23,20 @@ const app = express();
 app.use(cors());
 
 // Raw body needed for LiveKit webhook signature verification
-app.use('/api/livekit-webhook', express.raw({ type: 'application/webhook+json' }));
+// We use a custom parser to ensure it's captured correctly regardless of headers
+app.use('/api/livekit-webhook', (req, res, next) => {
+    if (req.method === 'POST') {
+        let data = '';
+        req.setEncoding('utf8');
+        req.on('data', (chunk) => { data += chunk; });
+        req.on('end', () => {
+            (req as any).rawBody = data;
+            next();
+        });
+    } else {
+        next();
+    }
+});
 app.use(express.json());
 
 const SILENCE_TIMEOUT_MS = 2 * 60 * 1000; // 2 minutes
@@ -324,10 +337,18 @@ app.post('/api/livekit-webhook', async (req: express.Request, res: express.Respo
     const apiSecret = process.env.LIVEKIT_API_SECRET!;
 
     try {
+        console.log(`[webhook] Received POST. Auth header present: ${!!req.headers['authorization']}`);
+        const rawBody = (req as any).rawBody;
+        if (!rawBody) {
+            console.error('[webhook] No raw body found for verification');
+            return res.status(400).send('No body');
+        }
+
         const receiver = new WebhookReceiver(apiKey, apiSecret);
-        const event = await receiver.receive(req.body.toString(), req.headers['authorization'] as string);
+        const event = await receiver.receive(rawBody, req.headers['authorization'] as string);
 
         const roomName = event.room?.name;
+        console.log(`[webhook] Received event: ${event.event} for room: ${roomName}`);
         if (!roomName || !process.env.DATABASE_URL) return res.sendStatus(200);
 
         if (event.event === 'room_started') {
@@ -337,8 +358,9 @@ app.post('/api/livekit-webhook', async (req: express.Request, res: express.Respo
                     apiKey,
                     apiSecret,
                 );
-                await dispatchClient.createDispatch(roomName, 'ai-tutor-agent');
-                console.log(`[webhook] Dispatched agent for room: ${roomName}`);
+                console.log(`[webhook] Attempting dispatch for agent 'ai-tutor-agent' in room: ${roomName}`);
+                const dispatch = await dispatchClient.createDispatch(roomName, 'ai-tutor-agent');
+                console.log(`[webhook] Dispatch successful. Dispatch ID: ${dispatch.id}`);
             } catch (e: any) {
                 console.error(`[webhook] Failed to dispatch agent for room ${roomName}:`, e.message);
             }

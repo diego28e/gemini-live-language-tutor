@@ -1,4 +1,4 @@
-import { WorkerOptions, cli, JobContext, voice, defineAgent, llm } from '@livekit/agents';
+import { ServerOptions, cli, JobContext, voice, defineAgent, llm } from '@livekit/agents';
 import * as dotenv from 'dotenv';
 import { pool } from './db.js';
 import { appendFileSync } from 'node:fs';
@@ -43,6 +43,9 @@ const SESSION_LIMIT_MS = 5 * 60 * 1000; // 5 minutes hard stop
 
 export default defineAgent({
     entry: async (ctx: JobContext) => {
+        // Redacted for security, just checking existence
+        log(`[agent] entry function called. DATABASE_URL present: ${!!process.env.DATABASE_URL}`);
+        
         // Extract room name securely from the matched job, before WebRTC resolves
         const roomName = ctx.job?.room?.name || ctx.room?.name || 'unknown';
         log(`[agent] Starting for room: ${roomName}`);
@@ -63,8 +66,12 @@ export default defineAgent({
         log(`[agent] Room name: ${roomName} → ${parts.length} parts; parsing lesson ID...`);
 
         const lessonFetchPromise: Promise<void> = (async () => {
-            if (parts.length >= 6 && parts[0] === 'l' && process.env.DATABASE_URL) {
-                const dbLessonId = `${parts[1]}-${parts[2]}-${parts[3]}-${parts[4]}-${parts[5]}`;
+            // Check if it starts with 'l-' followed by at least one part
+            if (parts[0] === 'l' && parts.length >= 2 && process.env.DATABASE_URL) {
+                // Lesson ID should be the middle parts before the random suffix
+                // If it's a UUID, it will have 5 parts: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+                // roomName: l-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx-random
+                const dbLessonId = parts.slice(1, parts.length - 1).join('-');
                 try {
                     log(`[agent] Fetching lesson: ${dbLessonId}`);
                     const result = await pool.query(
@@ -332,6 +339,4 @@ Pacing: When Moment 3 feels complete, deliver a short spoken debrief — one thi
     }
 });
 
-if (process.argv[1] === fileURLToPath(import.meta.url)) {
-    cli.runApp(new WorkerOptions({ agent: fileURLToPath(import.meta.url), agentName: 'ai-tutor-agent' }));
-}
+cli.runApp(new ServerOptions({ agent: fileURLToPath(import.meta.url), agentName: 'ai-tutor-agent' }));
