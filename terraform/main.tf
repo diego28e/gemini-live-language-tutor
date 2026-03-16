@@ -152,7 +152,7 @@ resource "google_project_iam_member" "sa_firebase" {
   member  = "serviceAccount:${google_service_account.cloud_run_sa.email}"
 }
 
-# ─── Cloud SQL (PostgreSQL 15) ────────────────────────────────────────────────
+# ─── Cloud SQL (PostgreSQL 18) ────────────────────────────────────────────────
 
 resource "random_id" "db_suffix" {
   byte_length = 4
@@ -164,7 +164,7 @@ resource "google_sql_database_instance" "main" {
     google_project_service.sql,
   ]
   name             = "ai-tutor-db-${random_id.db_suffix.hex}"
-  database_version = "POSTGRES_15"
+  database_version = "POSTGRES_18"
   region           = var.region
 
   settings {
