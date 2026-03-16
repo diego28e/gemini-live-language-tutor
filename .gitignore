@@ -35,6 +35,10 @@ terraform/.terraform/
 terraform/.terraform.lock.hcl
 terraform/terraform.tfstate
 terraform/terraform.tfstate.backup
+terraform/terraform.tfstate.*.backup
+terraform.tfstate
+*.tfstate.lock.info
+frontend/.firebase/
 
 # Debug/scratch logs
 *.log
@@ -49,3 +53,6 @@ bash.exe.stackdump
 cloud-sql-proxy*
 {,
 {}
+dbtest.mjs
+nul
+backend/connection-test.ts
