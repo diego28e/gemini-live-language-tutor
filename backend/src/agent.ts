@@ -1,6 +1,12 @@
 import { WorkerOptions, cli, JobContext, voice, defineAgent, llm } from '@livekit/agents';
 import * as dotenv from 'dotenv';
 import { pool } from './db.js';
+import { appendFileSync } from 'node:fs';
+const log = (msg: string) => {
+    const line = `[${new Date().toISOString()}] ${msg}\n`;
+    process.stderr.write(line);
+    try { appendFileSync('/tmp/agent-debug.log', line); } catch (_) {}
+};
 import * as google from '@livekit/agents-plugin-google';
 import { fileURLToPath } from 'node:url';
 import { VideoStream, VideoBufferType, TrackKind } from '@livekit/rtc-node';
@@ -39,7 +45,7 @@ export default defineAgent({
     entry: async (ctx: JobContext) => {
         // Extract room name securely from the matched job, before WebRTC resolves
         const roomName = ctx.job?.room?.name || ctx.room?.name || 'unknown';
-        console.log(`[agent] Starting for room: ${roomName}`);
+        log(`[agent] Starting for room: ${roomName}`);
 
         let systemPrompt = "You are a helpful language tutor. Keep your answers concise.";
         let agentVoice = "Aoede";
@@ -54,13 +60,13 @@ export default defineAgent({
 
         // Parse lesson ID from room name immediately so DB + WebRTC connect can run in parallel
         const parts = roomName.split('-');
-        console.log(`[agent] Room name: ${roomName} → ${parts.length} parts; parsing lesson ID...`);
+        log(`[agent] Room name: ${roomName} → ${parts.length} parts; parsing lesson ID...`);
 
         const lessonFetchPromise: Promise<void> = (async () => {
             if (parts.length >= 6 && parts[0] === 'l' && process.env.DATABASE_URL) {
                 const dbLessonId = `${parts[1]}-${parts[2]}-${parts[3]}-${parts[4]}-${parts[5]}`;
                 try {
-                    console.log(`[agent] Fetching lesson: ${dbLessonId}`);
+                    log(`[agent] Fetching lesson: ${dbLessonId}`);
                     const result = await pool.query(
                         `SELECT title, grammar_focus, vocab_focus, cefr_level, language,
                                 moment_1_presentation, moment_2_practice, moment_3_conversation
@@ -71,7 +77,7 @@ export default defineAgent({
                         const { title, grammar_focus, vocab_focus, cefr_level, language,
                             moment_1_presentation, moment_2_practice, moment_3_conversation } = result.rows[0];
                         lessonContext = { language, grammar_focus, vocab_focus, cefr_level };
-                        console.log(`[agent] Loaded lesson: ${title} (${language})`);
+                    log(`[agent] Loaded lesson: ${title} (${language})`);
                         systemPrompt = `You are an expert ${language} tutor running a 5-minute lesson called "${title}" at CEFR level ${cefr_level}. This is a voice session — speak naturally at all times.
 
 The lesson has three moments. Move through them in order without announcing transitions.
@@ -101,29 +107,29 @@ Tone: Warm, encouraging, and concise. Never lecture. One sentence of feedback ma
 
 Pacing: When Moment 3 feels complete, deliver a short spoken debrief — one thing they did well, one correction with the correct form, and one vocabulary or fluency tip. If Moment 3 was a roleplay, step out of character before the debrief.`;
                     } else {
-                        console.warn(`[agent] DB returned 0 rows for lesson ID: ${dbLessonId}. Using fallback prompt.`);
+                    log(`[agent] DB returned 0 rows for lesson ID: ${dbLessonId}. Using fallback prompt.`);
                     }
                 } catch (e) {
-                    console.error(`[agent] DB Error for ${dbLessonId}:`, e);
+                    log(`[agent] DB Error for ${dbLessonId}: ${e}`);
                 }
             } else {
-                console.log(`[agent] Room name unrecognized or DATABASE_URL not set — using fallback prompt.`);
+                log(`[agent] Room name unrecognized or DATABASE_URL not set — using fallback prompt.`);
             }
         })();
 
         try {
-            console.log(`[agent] Connecting to room and fetching lesson in parallel...`);
+            log(`[agent] Connecting to room and fetching lesson in parallel...`);
             const [connResult] = await Promise.allSettled([
                 ctx.connect(),
                 lessonFetchPromise,
             ]);
             if (connResult.status === 'rejected') {
-                console.error(`[agent] WebRTC ctx.connect() failed!`, connResult.reason);
+                log(`[agent] WebRTC ctx.connect() failed: ${connResult.reason}`);
                 return;
             }
-            console.log(`[agent] Connected to ${roomName}, lesson data ready.`);
+            log(`[agent] Connected to ${roomName}, lesson data ready.`);
         } catch (connErr) {
-            console.error(`[agent] Unexpected connect error`, connErr);
+            log(`[agent] Unexpected connect error: ${connErr}`);
             return;
         }
 
@@ -144,12 +150,12 @@ Pacing: When Moment 3 feels complete, deliver a short spoken debrief — one thi
 
             const session = new voice.AgentSession({ llm: realtimeModel });
             try {
-                console.log("[agent] Starting voice AgentSession...");
+                log(`[agent] Starting voice AgentSession...`);
                 await session.start({ agent, room: ctx.room! });
                 session.generateReply();
-                console.log("[agent] AgentSession started and generateReply triggered.");
+                log(`[agent] AgentSession started and generateReply triggered.`);
             } catch (sessionErr) {
-                console.error("[agent] Session start failed!", sessionErr);
+                log(`[agent] Session start failed: ${sessionErr}`);
                 return;
             }
             // Key: segmentId (one per agent turn). Updated on EVERY word chunk so
@@ -266,7 +272,7 @@ Pacing: When Moment 3 feels complete, deliver a short spoken debrief — one thi
 
             // 5-minute hard stop
             const hardStopTimer = setTimeout(async () => {
-                console.log(`[agent] 5-minute session limit reached for room: ${roomName}`);
+                log(`[agent] 5-minute session limit reached for room: ${roomName}`);
                 try {
                     session.say("We've reached the end of our 5-minute session! Great work today. Keep practicing and see you next time!");
                 } catch (_) { }
@@ -281,7 +287,7 @@ Pacing: When Moment 3 feels complete, deliver a short spoken debrief — one thi
                                 Buffer.from(JSON.stringify({ type: 'session_ended' })),
                                 { reliable: true }
                             );
-                            console.log('[agent] session_ended data message sent to frontend');
+                            log(`[agent] session_ended data message sent to frontend`);
                         }
                     } catch (_) { }
 
@@ -291,7 +297,7 @@ Pacing: When Moment 3 feels complete, deliver a short spoken debrief — one thi
 
             session.on(voice.AgentSessionEventTypes.Close, async () => {
                 clearTimeout(hardStopTimer);
-                console.log(`[agent] Session closed for room: ${roomName}`);
+                log(`[agent] Session closed for room: ${roomName}`);
 
                 if (!process.env.DATABASE_URL) {
                     console.warn('[agent] DATABASE_URL not set — skipping session finalization');
@@ -310,22 +316,22 @@ Pacing: When Moment 3 feels complete, deliver a short spoken debrief — one thi
                          RETURNING id`,
                         [roomName]
                     );
-                    console.log(`[agent] Sessions UPDATE matched ${sessionResult.rows.length} row(s)`);
+                    log(`[agent] Sessions UPDATE matched ${sessionResult.rows.length} row(s)`);
                 } catch (e) {
-                    console.error('[agent] Error finalizing session:', e);
+                    log(`[agent] Error finalizing session: ${e}`);
                 }
             });
 
         } catch (e) {
-            console.error("Failed to start agent.", e);
+            log(`[agent] Failed to start agent: ${e}`);
         }
 
         ctx.room?.on('disconnected', () => {
-            console.log(`[agent] Disconnected from ${roomName}`);
+            log(`[agent] Disconnected from ${roomName}`);
         });
     }
 });
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-    cli.runApp(new WorkerOptions({ agent: fileURLToPath(import.meta.url) }));
+    cli.runApp(new WorkerOptions({ agent: fileURLToPath(import.meta.url), agentName: 'ai-tutor-agent' }));
 }

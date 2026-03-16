@@ -2,7 +2,7 @@ import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import admin from 'firebase-admin';
-import { AccessToken, WebhookReceiver } from 'livekit-server-sdk';
+import { AccessToken, WebhookReceiver, AgentDispatchClient } from 'livekit-server-sdk';
 import { v4 as uuidv4 } from 'uuid';
 import { pool } from './db.js';
 import { runEvaluation } from './evaluator.js';
@@ -329,6 +329,20 @@ app.post('/api/livekit-webhook', async (req: express.Request, res: express.Respo
 
         const roomName = event.room?.name;
         if (!roomName || !process.env.DATABASE_URL) return res.sendStatus(200);
+
+        if (event.event === 'room_started') {
+            try {
+                const dispatchClient = new AgentDispatchClient(
+                    process.env.LIVEKIT_URL!.replace('wss://', 'https://'),
+                    apiKey,
+                    apiSecret,
+                );
+                await dispatchClient.createDispatch(roomName, 'ai-tutor-agent');
+                console.log(`[webhook] Dispatched agent for room: ${roomName}`);
+            } catch (e: any) {
+                console.error(`[webhook] Failed to dispatch agent for room ${roomName}:`, e.message);
+            }
+        }
 
         if (event.event === 'participant_left') {
             setTimeout(async () => {
